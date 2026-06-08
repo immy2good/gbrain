@@ -431,6 +431,8 @@ export function detectCodeLanguage(filePath: string, content?: string): Supporte
   if (lower.endsWith('.rs')) return 'rust';
   if (lower.endsWith('.java')) return 'java';
   if (lower.endsWith('.cs')) return 'c_sharp';
+  // MQL4/MQL5 (MetaQuotes) -- a C/C++ subset; parse via tree-sitter-cpp (iTradeAIMS).
+  if (lower.endsWith('.mq4') || lower.endsWith('.mq5') || lower.endsWith('.mqh')) return 'cpp';
   if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx') || lower.endsWith('.hpp') || lower.endsWith('.hxx') || lower.endsWith('.hh')) return 'cpp';
   if (lower.endsWith('.c') || lower.endsWith('.h')) return 'c';
   if (lower.endsWith('.php')) return 'php';

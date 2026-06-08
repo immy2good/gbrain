@@ -61,6 +61,8 @@ const CODE_EXTENSIONS = new Set<string>([
   '.cs',
   '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh',
   '.c', '.h',
+  // MQL4/MQL5 (MetaQuotes) -- a C/C++ subset; collected here, parsed via tree-sitter-cpp (iTradeAIMS).
+  '.mq4', '.mq5', '.mqh',
   '.php',
   '.swift',
   '.kt', '.kts',
