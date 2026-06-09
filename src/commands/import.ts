@@ -528,12 +528,19 @@ function isCollectibleForWalker(
  * 5. `.sort()` output — `runImport`'s checkpoint-resume at line 68–74 is
  *    index-based against a sorted list. Unstable order skips the wrong
  *    files on resume.
+ * 6. `.gitignore` honored — the walker already skips `.git`, `node_modules`,
+ *    `ops`, and dot-dirs; gitignored content (build outputs, generated
+ *    artifacts, vendored caches) is the same class of non-source noise and
+ *    must not be ingested. Files matched by the repo's ignore rules are
+ *    skipped. Degrades to no filtering when `dir` is not a git repo, so
+ *    non-git sources are unaffected.
  */
 export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): string[] {
   const strategy: SyncStrategy = opts.strategy ?? 'markdown';
   const multimodalOn = process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true';
   const maxDepth = resolveMaxWalkDepth();
   const visitedInodes = new Map<string, true>();
+  const ignored = collectGitIgnoredFiles(dir);
   const files: string[] = [];
 
   function walk(d: string, depth: number): void {
@@ -578,6 +585,10 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
         walk(full, depth + 1);
       } else if (stat.isFile()) {
         if (!isCollectibleForWalker(entry, strategy, multimodalOn)) continue;
+        if (ignored.size > 0) {
+          const rel = relative(dir, full).replace(/\\/g, '/');
+          if (ignored.has(rel)) continue;
+        }
         files.push(full);
       }
     }
@@ -585,6 +596,31 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
 
   walk(dir, 0);
   return files.sort();
+}
+
+/**
+ * Precompute the set of files under `dir` that the repo's ignore rules exclude
+ * (`.gitignore`, `.git/info/exclude`, core.excludesFile), as paths relative to
+ * `dir` with forward slashes — matching what `relative(dir, full)` produces in
+ * the walker. Runs `git` once per walk. Returns an empty set (no filtering)
+ * when `dir` is not a git work tree or `git` is unavailable, preserving the
+ * walker's behavior for non-git sources.
+ */
+function collectGitIgnoredFiles(dir: string): Set<string> {
+  const ignored = new Set<string>();
+  try {
+    const stdout = execFileSync(
+      'git',
+      ['-C', dir, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+      { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    for (const p of stdout.split('\0')) {
+      if (p) ignored.add(p);
+    }
+  } catch {
+    // Not a git work tree (or git unavailable): no filtering.
+  }
+  return ignored;
 }
 
 /**
