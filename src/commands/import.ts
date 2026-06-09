@@ -532,6 +532,27 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   const visitedInodes = new Map<string, true>();
   const files: string[] = [];
 
+  // iTradeAIMS: honor the repo's .gitignore. The raw readdir walk otherwise
+  // ingests gitignored-but-on-disk files (e.g. generated `artifacts/` backtest
+  // reports) that (a) break on binary/UTF-16 content and (b) bypass any
+  // tracked-only content gate. Precompute the git-ignored untracked set once
+  // and skip those files in the walk. Degrades to NO filtering when `dir` is
+  // not a git repo (git errors) — preserving the prior behavior for non-git
+  // sources. (Dot-dirs / node_modules / ops are still pruned below.)
+  const gitIgnored = new Set<string>();
+  try {
+    const out = execFileSync(
+      'git',
+      ['-C', dir, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+      { encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 },
+    );
+    for (const p of out.split('\0')) {
+      if (p) gitIgnored.add(p);
+    }
+  } catch {
+    // Not a git repo (or git unavailable): leave gitIgnored empty -> no filtering.
+  }
+
   function walk(d: string, depth: number): void {
     if (depth >= maxDepth) {
       console.warn(`[gbrain] walker depth limit reached at ${d}; skipping`);
@@ -574,6 +595,10 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
         walk(full, depth + 1);
       } else if (stat.isFile()) {
         if (!isCollectibleForWalker(entry, strategy, multimodalOn)) continue;
+        if (gitIgnored.size > 0) {
+          const rel = relative(dir, full).replace(/\\/g, '/');
+          if (gitIgnored.has(rel)) continue; // skip gitignored-but-on-disk files
+        }
         files.push(full);
       }
     }
