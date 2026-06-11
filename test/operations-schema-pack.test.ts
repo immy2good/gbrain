@@ -148,7 +148,15 @@ describe('list_schema_packs', () => {
     await withEnv({ GBRAIN_HOME: tmpDir }, async () => {
       seedPack('mine');
       const result = await operationsByName.list_schema_packs!.handler(ctxOf(), {}) as { bundled: string[]; installed: string[] };
-      expect(result.bundled).toContain('gbrain-base');
+      expect(result.bundled).toEqual(expect.arrayContaining([
+        'gbrain-base',
+        'gbrain-base-v2',
+        'gbrain-recommended',
+        'gbrain-creator',
+        'gbrain-investor',
+        'gbrain-engineer',
+        'gbrain-everything',
+      ]));
       expect(result.installed).toContain('mine');
     });
   });

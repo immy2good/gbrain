@@ -65,6 +65,22 @@ describe('gbrain schema CLI (Phase C)', () => {
     expect(r.stdout).toContain('gbrain-base');
   });
 
+  test('schema list exposes all bundled canonical packs', () => {
+    const r = gbrain(['schema', 'list']);
+    expect(r.code).toBe(0);
+    for (const pack of [
+      'gbrain-base',
+      'gbrain-base-v2',
+      'gbrain-recommended',
+      'gbrain-creator',
+      'gbrain-investor',
+      'gbrain-engineer',
+      'gbrain-everything',
+    ]) {
+      expect(r.stdout).toContain(pack);
+    }
+  });
+
   test('schema show gbrain-base prints manifest details', () => {
     const r = gbrain(['schema', 'show', 'gbrain-base']);
     expect(r.code).toBe(0);
@@ -78,6 +94,13 @@ describe('gbrain schema CLI (Phase C)', () => {
     expect(r.stdout).toContain('Takes kinds: fact, take, bet, hunch');
     expect(r.stdout).toContain('person :: entity');
     expect(r.stdout).toContain('company :: entity');
+  });
+
+  test('schema show can inspect bundled lens packs', () => {
+    const r = gbrain(['schema', 'show', 'gbrain-engineer']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('gbrain-engineer v');
+    expect(r.stdout).toContain('learning :: annotation');
   });
 
   test('schema validate gbrain-base passes', () => {

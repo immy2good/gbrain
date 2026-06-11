@@ -16,13 +16,14 @@ describe('CHUNKER_VERSION', () => {
 });
 
 describe('detectCodeLanguage', () => {
-  test('recognizes all 30 supported extensions', () => {
+  test('recognizes all supported extensions', () => {
     const cases: Record<string, string> = {
       'foo.ts': 'typescript', 'foo.tsx': 'tsx', 'foo.mts': 'typescript', 'foo.cts': 'typescript',
       'foo.js': 'javascript', 'foo.jsx': 'javascript', 'foo.mjs': 'javascript', 'foo.cjs': 'javascript',
       'foo.py': 'python', 'foo.rb': 'ruby', 'foo.go': 'go',
       'foo.rs': 'rust', 'foo.java': 'java', 'foo.cs': 'c_sharp',
       'foo.cpp': 'cpp', 'foo.cc': 'cpp', 'foo.hpp': 'cpp',
+      'foo.mq4': 'cpp', 'foo.mq5': 'cpp', 'foo.mqh': 'cpp',
       'foo.c': 'c', 'foo.h': 'c',
       'foo.php': 'php', 'foo.swift': 'swift', 'foo.kt': 'kotlin',
       'foo.scala': 'scala', 'foo.lua': 'lua', 'foo.ex': 'elixir',
@@ -48,6 +49,7 @@ describe('detectCodeLanguage', () => {
     expect(detectCodeLanguage('Main.GO')).toBe('go');
     expect(detectCodeLanguage('App.TSX')).toBe('tsx');
     expect(detectCodeLanguage('Schema.SQL')).toBe('sql');
+    expect(detectCodeLanguage('Experts/BananaEA.MQ4')).toBe('cpp');
   });
 });
 

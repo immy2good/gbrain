@@ -139,6 +139,7 @@ export interface AddSourceOpts {
   localPath?: string | null;
   remoteUrl?: string;
   federated?: boolean | null;
+  strategy?: 'markdown' | 'code' | 'auto';
   /**
    * Override clone destination. Defaults to $GBRAIN_HOME/clones/<id>/.
    * Only honored when remoteUrl is set.
@@ -331,6 +332,9 @@ export async function addSource(
     if (opts.federated !== null && opts.federated !== undefined) {
       config.federated = opts.federated;
     }
+    if (opts.strategy) {
+      config.strategy = opts.strategy;
+    }
     const displayName = opts.name ?? opts.id;
 
     try {
@@ -378,6 +382,9 @@ export async function addSource(
     const config: Record<string, unknown> = {};
     if (opts.federated !== null && opts.federated !== undefined) {
       config.federated = opts.federated;
+    }
+    if (opts.strategy) {
+      config.strategy = opts.strategy;
     }
     const displayName = opts.name ?? opts.id;
     await engine.executeRaw(

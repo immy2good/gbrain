@@ -4133,7 +4133,8 @@ const list_schema_packs: Operation = {
     const { existsSync, readdirSync } = await import('node:fs');
     const { join } = await import('node:path');
     const { gbrainPath } = await import('./config.ts');
-    const bundled = ['gbrain-base', 'gbrain-recommended'];
+    const { BUNDLED_SCHEMA_PACK_NAMES } = await import('./schema-pack/bundled-manifests.ts');
+    const bundled = [...BUNDLED_SCHEMA_PACK_NAMES];
     const installedDir = gbrainPath('schema-packs');
     const installed: string[] = [];
     if (existsSync(installedDir)) {

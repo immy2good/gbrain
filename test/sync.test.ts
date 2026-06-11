@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { buildSyncManifest, isSyncable, pathToSlug, pruneDir, isCodeFilePath } from '../src/core/sync.ts';
-import { buildAutoEmbedArgs, buildGitInvocation } from '../src/commands/sync.ts';
+import { buildAutoEmbedArgs, buildGitInvocation, runSync } from '../src/commands/sync.ts';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
@@ -345,6 +345,28 @@ describe('performSync dry-run never writes', () => {
     // Bookmark NOT set — this is the regression the guard enforces.
     expect(await engine.getConfig('sync.last_commit')).toBeNull();
     expect(await engine.getConfig('sync.repo_path')).toBeNull();
+  });
+
+  test('single-source sync uses persisted source strategy when no CLI strategy is passed', async () => {
+    mkdirSync(join(repoPath, 'Experts'), { recursive: true });
+    writeFileSync(join(repoPath, 'Experts/BananaEA.mq4'), 'int OnInit() { return 0; }\n');
+    execSync('git add -A && git commit -m "add mql"', { cwd: repoPath, stdio: 'pipe' });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('indicators', 'indicators', $1, '{"strategy":"auto"}'::jsonb)`,
+      [repoPath],
+    );
+
+    const messages: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { messages.push(args.map(String).join(' ')); };
+    try {
+      await runSync(engine, ['--source', 'indicators', '--full', '--dry-run', '--no-pull', '--no-embed']);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(messages.some(m => m.includes('Full-sync dry run (strategy=auto): 3 file(s)'))).toBe(true);
   });
 
   test('first sync without origin skips git pull noise and uses local working tree', async () => {

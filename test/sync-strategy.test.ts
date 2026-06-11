@@ -14,6 +14,12 @@ describe('isCodeFilePath', () => {
     expect(isCodeFilePath('main.go')).toBe(true);
   });
 
+  test('recognizes MetaTrader MQL source files as code', () => {
+    expect(isCodeFilePath('Experts/BananaEA.mq4')).toBe(true);
+    expect(isCodeFilePath('Experts/BananaEA.mq5')).toBe(true);
+    expect(isCodeFilePath('Include/BananaCore.mqh')).toBe(true);
+  });
+
   test('rejects non-code extensions', () => {
     expect(isCodeFilePath('notes.md')).toBe(false);
     expect(isCodeFilePath('photo.jpg')).toBe(false);
@@ -43,12 +49,15 @@ describe('isSyncable with strategy', () => {
     expect(isSyncable('src/foo.ts', { strategy: 'code' })).toBe(true);
     expect(isSyncable('src/foo.py', { strategy: 'code' })).toBe(true);
     expect(isSyncable('src/foo.go', { strategy: 'code' })).toBe(true);
+    expect(isSyncable('Experts/BananaEA.mq4', { strategy: 'code' })).toBe(true);
+    expect(isSyncable('Include/BananaCore.mqh', { strategy: 'code' })).toBe(true);
     expect(isSyncable('notes.md', { strategy: 'code' })).toBe(false);
   });
 
   test('strategy=auto accepts both markdown and code', () => {
     expect(isSyncable('notes.md', { strategy: 'auto' })).toBe(true);
     expect(isSyncable('src/foo.ts', { strategy: 'auto' })).toBe(true);
+    expect(isSyncable('Experts/BananaEA.mq5', { strategy: 'auto' })).toBe(true);
   });
 
   test('existing skip rules apply across all strategies', () => {

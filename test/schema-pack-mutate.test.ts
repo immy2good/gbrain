@@ -99,16 +99,28 @@ describe('locateMutablePackFile — bundled guard', () => {
   });
 
   it('BUNDLED_PACK_NAMES export contains all bundled packs', () => {
-    expect(BUNDLED_PACK_NAMES.has('gbrain-base')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.has('gbrain-recommended')).toBe(true);
-    // v0.42 (T22): gbrain-base-v2 joins the bundled set.
-    expect(BUNDLED_PACK_NAMES.has('gbrain-base-v2')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.size).toBe(3);
+    for (const pack of [
+      'gbrain-base',
+      'gbrain-base-v2',
+      'gbrain-recommended',
+      'gbrain-creator',
+      'gbrain-investor',
+      'gbrain-engineer',
+      'gbrain-everything',
+    ]) {
+      expect(BUNDLED_PACK_NAMES.has(pack)).toBe(true);
+    }
+    expect(BUNDLED_PACK_NAMES.size).toBe(7);
   });
 
-  it('rejects gbrain-base-v2 with PACK_READONLY (bundled guard)', () => {
-    try { locateMutablePackFile('gbrain-base-v2'); } catch (e) {
-      expect((e as SchemaPackMutationError).code).toBe('PACK_READONLY');
+  it('rejects every bundled pack with PACK_READONLY', () => {
+    for (const pack of BUNDLED_PACK_NAMES) {
+      try {
+        locateMutablePackFile(pack);
+        throw new Error(`expected ${pack} to be read-only`);
+      } catch (e) {
+        expect((e as SchemaPackMutationError).code).toBe('PACK_READONLY');
+      }
     }
   });
 });
