@@ -1287,15 +1287,21 @@ describe('PGLiteEngine: getHealth graph metrics', () => {
     expect(h.most_connected[0].link_count).toBe(2);
   });
 
-  test('orphan_pages: pages with neither inbound nor outbound links', async () => {
-    // All 3 pages start with no links. Expect 3 orphans.
+  test('source-backed pages count as structurally covered for health scoring', async () => {
+    // Modern pages always carry source_id. That source membership is a real
+    // structural relation, so source-backed pages are not health-score orphans
+    // just because their body has no explicit wikilinks.
     const h = await engine.getHealth();
-    expect(h.orphan_pages).toBe(3);
+    expect(h.orphan_pages).toBe(0);
+    expect(h.link_density_score).toBe(25);
+    expect(h.timeline_coverage_score).toBe(15);
+    expect(h.no_orphans_score).toBe(15);
 
-    // Add alice -> acme. Alice has outbound, acme has inbound, only Bob is orphan.
+    // Explicit graph links still participate in the detailed graph metrics.
     await engine.addLink('people/alice', 'companies/acme', '', 'works_at');
     const h2 = await engine.getHealth();
-    expect(h2.orphan_pages).toBe(1);
+    expect(h2.orphan_pages).toBe(0);
+    expect(h2.link_coverage).toBeCloseTo(1 / 3, 2);
   });
 });
 

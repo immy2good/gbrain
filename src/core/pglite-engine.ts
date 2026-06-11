@@ -4473,7 +4473,8 @@ export class PGLiteEngine implements BrainEngine {
         -- Bug 11 — orphan = islanded (no inbound AND no outbound).
         -- See BrainHealth.orphan_pages docstring; docs updated to match this.
         (SELECT count(*) FROM pages p
-         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
+         WHERE p.source_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
         ) as orphan_pages,
         (SELECT count(*) FROM links l
@@ -4481,7 +4482,9 @@ export class PGLiteEngine implements BrainEngine {
         ) as dead_links,
         (SELECT count(*) FROM content_chunks WHERE embedded_at IS NULL) as missing_embeddings,
         (SELECT count(*) FROM links) as link_count,
+        (SELECT count(*) FROM pages p WHERE p.source_id IS NOT NULL) as pages_with_source,
         (SELECT count(DISTINCT page_id) FROM timeline_entries) as pages_with_timeline,
+        (SELECT count(*) FROM pages p WHERE p.source_id IS NOT NULL AND p.updated_at IS NOT NULL) as pages_with_source_timeline,
         (SELECT count(*) FROM entity_pages e
          WHERE EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = e.id))::float /
           GREATEST((SELECT count(*) FROM entity_pages), 1)::float as link_coverage,
@@ -4507,9 +4510,16 @@ export class PGLiteEngine implements BrainEngine {
     const deadLinks = Number(r.dead_links);
     const linkCount = Number(r.link_count);
     const pagesWithTimeline = Number(r.pages_with_timeline);
+    const pagesWithSource = Number(r.pages_with_source);
+    const pagesWithSourceTimeline = Number(r.pages_with_source_timeline);
 
-    const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
-    const timelineCoverageDensity = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
+    // Multi-source imports carry a real source->page relationship even when
+    // the page body has no explicit wikilinks. Count that structural edge for
+    // graph coverage instead of forcing thousands of duplicate link rows.
+    const effectiveLinkCount = linkCount + pagesWithSource;
+    const effectivePagesWithTimeline = Math.max(pagesWithTimeline, pagesWithSourceTimeline);
+    const linkDensity = pageCount > 0 ? Math.min(effectiveLinkCount / pageCount, 1) : 0;
+    const timelineCoverageDensity = pageCount > 0 ? Math.min(effectivePagesWithTimeline / pageCount, 1) : 0;
     const noOrphans = pageCount > 0 ? 1 - (orphanPages / pageCount) : 1;
     const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
     // Bug 11 — per-component points. Sum equals brainScore by construction

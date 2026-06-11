@@ -123,7 +123,7 @@ async function scanFeatures(engine: BrainEngine): Promise<FeatureScanResult> {
     }
 
     // Zero timeline
-    if (stats.timeline_entry_count === 0 && stats.page_count > 5) {
+    if (stats.timeline_entry_count === 0 && health.timeline_coverage_score === 0 && stats.page_count > 5) {
       recommendations.push({
         id: 'zero-timeline', priority: 2,
         title: 'Extract Timeline',
