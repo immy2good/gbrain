@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { buildDetachedSupervisorSpawn } from '../src/commands/jobs.ts';
+import { buildDetachedSupervisorSpawn, DETACHED_SUPERVISOR_STDIO } from '../src/commands/jobs.ts';
 
 describe('buildDetachedSupervisorSpawn', () => {
   test('source execution re-runs bun with cli.ts as argv[1]', () => {
@@ -28,5 +28,9 @@ describe('buildDetachedSupervisorSpawn', () => {
 
     expect(spawn.command).toBe('C:/Users/example/.bun/bin/gbrain.exe');
     expect(spawn.args).toEqual(['jobs', 'supervisor', 'start', '--json']);
+  });
+
+  test('detached supervisor does not inherit parent stdio handles', () => {
+    expect(DETACHED_SUPERVISOR_STDIO).toEqual(['ignore', 'ignore', 'ignore']);
   });
 });

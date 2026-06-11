@@ -103,6 +103,25 @@ describe('parseSkillFrontmatter', () => {
     expect(fm!.triggers).toEqual(['foo', 'bar']);
   });
 
+  test('parses CRLF frontmatter from Windows checkouts', () => {
+    const content = [
+      '---',
+      'name: windows-skill',
+      'triggers:',
+      '  - "optimize this skill"',
+      '  - "run skillopt"',
+      'brain_first: exempt',
+      '---',
+      '',
+      '# Windows Skill',
+    ].join('\r\n');
+    const fm = parseSkillFrontmatter(content);
+    expect(fm).not.toBeNull();
+    expect(fm!.name).toBe('windows-skill');
+    expect(fm!.triggers).toEqual(['optimize this skill', 'run skillopt']);
+    expect(fm!.brain_first).toBe('exempt');
+  });
+
   test('canonical brain_first: exempt populates the typed field', () => {
     const content = '---\nname: x\nbrain_first: exempt\n---\n';
     const fm = parseSkillFrontmatter(content);

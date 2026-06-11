@@ -21,6 +21,8 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+export const DETACHED_SUPERVISOR_STDIO: ['ignore', 'ignore', 'ignore'] = ['ignore', 'ignore', 'ignore'];
+
 export function buildDetachedSupervisorSpawn(
   execPath: string,
   argv1: string | undefined,
@@ -1206,7 +1208,8 @@ HANDLER TYPES (built in)
         const childSpawn = buildDetachedSupervisorSpawn(process.execPath, process.argv[1], childArgs);
         const child = spawn(childSpawn.command, childSpawn.args, {
           detached: true,
-          stdio: ['ignore', 'ignore', 'inherit'],
+          stdio: DETACHED_SUPERVISOR_STDIO,
+          windowsHide: true,
           env: process.env,
         });
         child.unref();
