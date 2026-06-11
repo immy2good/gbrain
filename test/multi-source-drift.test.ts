@@ -146,6 +146,18 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.walk_truncated).toBe(true);
   });
 
+  test('case 5b: default walk budget covers ordinary large source without env tuning', async () => {
+    const root = makeTmpRoot('case5b');
+    for (let i = 0; i < 10_050; i++) {
+      seedFile(root, `topics/file-${i}.md`);
+    }
+
+    const result = await findMisroutedPages(engine, [{ id: 'src-case5b-fake', local_path: root }]);
+
+    expect(result.walk_truncated).toBe(false);
+    expect(result.count).toBe(0);
+  }, 60_000);
+
   test('case 6 (OV13): unreadable local_path does NOT crash; returns empty', async () => {
     const result = await findMisroutedPages(engine, [
       { id: 'src-fake', local_path: '/nonexistent/path/that/does/not/exist' },

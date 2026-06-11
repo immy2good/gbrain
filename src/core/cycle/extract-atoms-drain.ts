@@ -34,7 +34,11 @@ export interface ExtractAtomsDrainDeps {
    */
   withLock: <T>(work: () => Promise<T>) => Promise<T>;
   /** Process one bounded batch (rediscovers eligibility). Returns counts. */
-  runBatch: () => Promise<{ extracted: number; skipped: number }>;
+  runBatch: () => Promise<{
+    extracted: number;
+    skipped: number;
+    failures?: Array<{ source: string; error: string }>;
+  }>;
   /** Count remaining eligible-but-unextracted pages, or null on query error. */
   countRemaining: () => Promise<number | null>;
   /** Injectable clock. Production: Date.now. */
@@ -61,6 +65,8 @@ export interface ExtractAtomsDrainResult {
   batches: number;
   /** Why the loop stopped: drained | window | no_progress | max_batches. */
   stopped: 'drained' | 'window' | 'no_progress' | 'max_batches';
+  /** Per-item failures surfaced by the extraction phase. */
+  failures: Array<{ source: string; error: string }>;
 }
 
 export async function runExtractAtomsDrain(
@@ -73,6 +79,7 @@ export async function runExtractAtomsDrain(
     let extracted = 0;
     let skipped = 0;
     let batches = 0;
+    const failures: ExtractAtomsDrainResult['failures'] = [];
     let stopped: ExtractAtomsDrainResult['stopped'] = 'window';
 
     while (deps.now() < deadline) {
@@ -84,6 +91,7 @@ export async function runExtractAtomsDrain(
       const r = await deps.runBatch();
       extracted += r.extracted;
       skipped += r.skipped;
+      failures.push(...(r.failures ?? []));
       batches++;
       deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
 
@@ -95,7 +103,7 @@ export async function runExtractAtomsDrain(
 
     const remaining = await deps.countRemaining();
     if (remaining === 0) stopped = 'drained';
-    return { phase: 'extract_atoms', status: 'ok', extracted, skipped, remaining, batches, stopped };
+    return { phase: 'extract_atoms', status: 'ok', extracted, skipped, remaining, batches, stopped, failures };
   });
 }
 
@@ -160,6 +168,13 @@ export async function runExtractAtomsDrainForSource(
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
+          failures: Array.isArray(d.failures)
+            ? d.failures
+                .filter((f): f is { source: string; error: string } =>
+                  typeof f === 'object' && f !== null &&
+                  typeof (f as { source?: unknown }).source === 'string' &&
+                  typeof (f as { error?: unknown }).error === 'string')
+            : [],
         };
       },
       countRemaining: () => countExtractAtomsBacklog(engine, extractionSourceId),

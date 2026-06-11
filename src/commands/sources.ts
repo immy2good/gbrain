@@ -7,7 +7,7 @@
  * full story.
  *
  * Subcommands:
- *   gbrain sources add <id> --path <path> [--name <display>] [--federated|--no-federated]
+ *   gbrain sources add <id> --path <path> [--name <display>] [--strategy markdown|code|auto] [--federated|--no-federated]
  *   gbrain sources list [--json]
  *   gbrain sources remove <id> [--yes] [--dry-run] [--keep-storage]
  *   gbrain sources rename <id> <new-name>
@@ -16,6 +16,7 @@
  *   gbrain sources detach        — remove .gbrain-source from CWD
  *   gbrain sources federate <id>   — sources.config.federated = true
  *   gbrain sources unfederate <id> — sources.config.federated = false
+ *   gbrain sources set-strategy <id> <markdown|code|auto> — sources.config.strategy
  *
  * NOT in scope for Step 6 (deferred per plan):
  *   - import-from-github (needs SSRF + clone integration)
@@ -119,7 +120,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   if (!id) {
     console.error(
       'Usage: gbrain sources add <id> [--path <path> | --url <https-url>] ' +
-        '[--name <display>] [--federated|--no-federated] [--clone-dir <path>]',
+        '[--name <display>] [--strategy markdown|code|auto] [--federated|--no-federated] [--clone-dir <path>]',
     );
     process.exit(2);
   }
@@ -129,12 +130,22 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   let displayName: string | undefined;
   let federated: boolean | null = null;
   let cloneDir: string | undefined;
+  let strategy: 'markdown' | 'code' | 'auto' | undefined;
 
   for (let i = 1; i < args.length; i++) {
     const a = args[i];
     if (a === '--path') { localPath = args[++i]; continue; }
     if (a === '--url') { remoteUrl = args[++i]; continue; }
     if (a === '--name') { displayName = args[++i]; continue; }
+    if (a === '--strategy') {
+      const value = args[++i];
+      if (value !== 'markdown' && value !== 'code' && value !== 'auto') {
+        console.error(`Invalid --strategy value: ${value}. Expected markdown, code, or auto.`);
+        process.exit(2);
+      }
+      strategy = value;
+      continue;
+    }
     if (a === '--federated') { federated = true; continue; }
     if (a === '--no-federated') { federated = false; continue; }
     if (a === '--clone-dir') { cloneDir = args[++i]; continue; }
@@ -156,6 +167,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
     localPath,
     remoteUrl,
     federated,
+    strategy,
     cloneDir,
   });
 
@@ -175,6 +187,9 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   console.log(
     `  federated: ${fed}${fed ? ' — appears in cross-source default search' : ' — only searched when explicitly named via --source'}`,
   );
+  if (strategy) {
+    console.log(`  strategy: ${strategy}`);
+  }
 }
 
 // ── Subcommand: list ────────────────────────────────────────
@@ -335,6 +350,47 @@ async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> 
   } else {
     console.log(`Set source "${id}" contextual_retrieval_mode = ${mode}.`);
   }
+}
+
+async function runSetStrategy(engine: BrainEngine, args: string[]): Promise<void> {
+  const id = args[0];
+  const strategy = args[1];
+
+  if (!id || !strategy) {
+    console.error('Usage: gbrain sources set-strategy <id> <markdown|code|auto>');
+    process.exit(2);
+  }
+  if (strategy !== 'markdown' && strategy !== 'code' && strategy !== 'auto') {
+    console.error(`Error: invalid strategy "${strategy}".`);
+    console.error('Valid options: markdown | code | auto');
+    process.exit(2);
+  }
+
+  const exists = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM sources WHERE id = $1 LIMIT 1`,
+    [id],
+  );
+  if (exists.length === 0) {
+    console.error(`Error: source "${id}" not found.`);
+    console.error(`  Run 'gbrain sources list' to see registered sources.`);
+    process.exit(4);
+  }
+
+  await engine.executeRaw(
+    `UPDATE sources
+        SET config = jsonb_set(
+          CASE
+            WHEN jsonb_typeof(config) = 'object' THEN config
+            ELSE '{}'::jsonb
+          END,
+          '{strategy}',
+          to_jsonb($1::text),
+          true
+        )
+      WHERE id = $2`,
+    [strategy, id],
+  );
+  console.log(`Set source "${id}" sync strategy = ${strategy}.`);
 }
 
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
@@ -1157,6 +1213,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'tracked-branch': return runTrackedBranch(engine, rest);
     // v0.40.3.0 contextual retrieval (from master)
     case 'set-cr-mode': return runSetCrMode(engine, rest);
+    case 'set-strategy': return runSetStrategy(engine, rest);
     case 'audit':      return runAudit(engine, rest);
     case undefined:
     case '--help':
@@ -1174,7 +1231,7 @@ function printHelp(): void {
   console.log(`gbrain sources — manage multi-source brain configuration (v0.26.5)
 
 Subcommands:
-  add <id> --path <p> [--name <n>] [--federated|--no-federated]
+  add <id> --path <p> [--name <n>] [--strategy markdown|code|auto] [--federated|--no-federated]
                                     Register a new source.
   list [--json]                     List registered sources with page counts.
   remove <id> [--confirm-destructive] [--dry-run]
@@ -1209,6 +1266,10 @@ Subcommands:
                                     override (v0.40.3.0). Pass "unset" or
                                     "default" to clear (NULL falls through
                                     to the global search.mode bundle).
+  set-strategy <id> <markdown|code|auto>
+                                    Per-source sync strategy. Use auto for
+                                    mixed docs+code repos; code for source-only
+                                    code repos.
 
 Source id: [a-z0-9-]{1,32}. Immutable citation key.
 

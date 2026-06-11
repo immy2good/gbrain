@@ -82,7 +82,7 @@ export interface ParsedFrontmatter {
  * `readFileSync(path, 'utf-8')` at the boundary.
  */
 export function parseSkillFrontmatter(content: string): ParsedFrontmatter | null {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fmMatch) return null;
   const raw = fmMatch[1];
   const out: ParsedFrontmatter = { raw };
@@ -135,7 +135,7 @@ function parseArrayField(raw: string, field: string): string[] | undefined {
     if (inner.length === 0) return [];
     return inner
       .split(',')
-      .map(s => s.trim().replace(/^["']|["']$/g, ''))
+      .map(normalizeArrayValue)
       .filter(Boolean);
   }
   // Block form: `field:` + indented `- value` lines on subsequent lines.
@@ -144,10 +144,14 @@ function parseArrayField(raw: string, field: string): string[] | undefined {
   if (blockMatch) {
     return blockMatch[1]
       .split('\n')
-      .map(l => l.replace(/^[ \t]+-[ \t]+/, '').replace(/^["']|["']$/g, '').trim())
+      .map(l => normalizeArrayValue(l.replace(/^[ \t]+-[ \t]+/, '')))
       .filter(Boolean);
   }
   return undefined;
+}
+
+function normalizeArrayValue(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, '').trim();
 }
 
 /**

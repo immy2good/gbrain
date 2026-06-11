@@ -21,6 +21,22 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+export const DETACHED_SUPERVISOR_STDIO: ['ignore', 'ignore', 'ignore'] = ['ignore', 'ignore', 'ignore'];
+
+export function buildDetachedSupervisorSpawn(
+  execPath: string,
+  argv1: string | undefined,
+  childArgs: string[],
+): { command: string; args: string[] } {
+  const normalizedExec = execPath.replace(/\\/g, '/').toLowerCase();
+  const execName = normalizedExec.split('/').pop() ?? '';
+  const execIsGbrain = execName === 'gbrain' || execName === 'gbrain.exe';
+  if (execIsGbrain || !argv1) {
+    return { command: execPath, args: childArgs };
+  }
+  return { command: execPath, args: [argv1, ...childArgs] };
+}
+
 /** Parse `--max-waiting N` from CLI args. Returns undefined if absent.
  *  Throws on malformed input (caller should surface the error and exit).
  *  Clamps to [1, 100] to match the queue-layer clamp in MinionQueue.add.
@@ -1189,9 +1205,11 @@ HANDLER TYPES (built in)
       if (detach) {
         const { spawn } = await import('child_process');
         const childArgs = process.argv.slice(2).filter(a => a !== '--detach');
-        const child = spawn(process.execPath, [process.argv[1], ...childArgs], {
+        const childSpawn = buildDetachedSupervisorSpawn(process.execPath, process.argv[1], childArgs);
+        const child = spawn(childSpawn.command, childSpawn.args, {
           detached: true,
-          stdio: ['ignore', 'ignore', 'inherit'],
+          stdio: DETACHED_SUPERVISOR_STDIO,
+          windowsHide: true,
           env: process.env,
         });
         child.unref();

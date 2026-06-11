@@ -196,9 +196,7 @@ describe('put_page write-through — config edge cases', () => {
 });
 
 describe('put_page write-through — multi-source filing', () => {
-  test('non-default source lands at brainDir/.sources/<id>/<slug>.md', async () => {
-    // Create a non-default source row first. Schema fields: id (PK),
-    // name (UNIQUE), plus the v0.26.5 archive columns with defaults.
+  test('non-default DB-only source skips disk write-through', async () => {
     await engine.executeRaw(
       "INSERT INTO sources (id, name) VALUES ('team-x', 'team-x')",
     );
@@ -206,10 +204,27 @@ describe('put_page write-through — multi-source filing', () => {
     const result = (await putPage.handler(ctx, {
       slug: 'shared/page',
       content: '---\ntitle: X\n---\n\nbody',
+    })) as { write_through?: { written: boolean; skipped?: string; path?: string } };
+    expect(result.write_through).toEqual({ written: false, skipped: 'source_db_only' });
+    expect(fs.existsSync(path.join(brainDir, '.sources/team-x/shared/page.md'))).toBe(false);
+  });
+
+  test('non-default filesystem source lands at its own local_path', async () => {
+    const sourceDir = path.join(tmpRoot, 'team-x-repo');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name, local_path) VALUES ('team-x', 'team-x', $1)",
+      [sourceDir],
+    );
+    const ctx = makeCtx({ sourceId: 'team-x' });
+    const result = (await putPage.handler(ctx, {
+      slug: 'shared/page',
+      content: '---\ntitle: X\n---\n\nbody',
     })) as { write_through?: { written: boolean; path?: string } };
     expect(result.write_through?.written).toBe(true);
-    expect(result.write_through?.path).toBe(path.join(brainDir, '.sources/team-x/shared/page.md'));
+    expect(result.write_through?.path).toBe(path.join(sourceDir, 'shared/page.md'));
     expect(fs.existsSync(result.write_through!.path!)).toBe(true);
+    expect(fs.existsSync(path.join(brainDir, '.sources/team-x/shared/page.md'))).toBe(false);
   });
 });
 

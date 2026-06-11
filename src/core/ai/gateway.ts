@@ -448,14 +448,20 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
   // Resolve expansion (utility tier) and chat (reasoning tier). Embedding is
   // intentionally NOT re-resolved here — switching embedding models invalidates
   // the vector index. Out of scope per v0.31.12 plan ("Embedding tier knob").
+  //
+  // If cfg already carries an explicit expansion/chat model, treat it as the
+  // fallback and do not let the built-in tier default replace it. Direct
+  // model-config keys (models.expansion/models.chat) and models.default still
+  // resolve inside resolveModel; the important bug is avoiding an implicit
+  // TIER_DEFAULTS.* overwrite of `gbrain config set chat_model ...`.
   const newExpansion = await resolveModel(engine, {
     configKey: 'models.expansion',
-    tier: 'utility',
+    tier: cfg.expansion_model ? undefined : 'utility',
     fallback: cfg.expansion_model ?? DEFAULT_EXPANSION_MODEL,
   });
   const newChat = await resolveModel(engine, {
     configKey: 'models.chat',
-    tier: 'reasoning',
+    tier: cfg.chat_model ? undefined : 'reasoning',
     fallback: cfg.chat_model ?? DEFAULT_CHAT_MODEL,
   });
 
@@ -741,6 +747,92 @@ export function diagnoseEmbedding(modelOverride?: string): EmbeddingDiagnosis {
   };
 }
 
+export type ChatDiagnosis =
+  | { ok: true; model: string; provider: string; recipeId: string }
+  | { ok: false; reason: 'no_gateway_config' }
+  | { ok: false; reason: 'no_model_configured' }
+  | { ok: false; reason: 'unknown_provider'; model: string; provider: string; message: string }
+  | { ok: false; reason: 'no_touchpoint'; model: string; provider: string; recipeId: string }
+  | { ok: false; reason: 'user_provided_model_unset'; model: string; provider: string; recipeId: string }
+  | { ok: false; reason: 'missing_env'; model: string; provider: string; recipeId: string; missingEnvVars: string[] };
+
+export function diagnoseChat(modelOverride?: string): ChatDiagnosis {
+  if (_chatTransport) {
+    const modelStr = modelOverride ?? _config?.chat_model ?? DEFAULT_CHAT_MODEL;
+    return { ok: true, model: modelStr, provider: '<test-transport>', recipeId: '<test-transport>' };
+  }
+
+  if (!_config) return { ok: false, reason: 'no_gateway_config' };
+
+  const modelStr = modelOverride ?? _config.chat_model ?? DEFAULT_CHAT_MODEL;
+  if (!modelStr) return { ok: false, reason: 'no_model_configured' };
+
+  let parsed;
+  let recipe;
+  try {
+    const resolved = resolveRecipe(modelStr);
+    parsed = resolved.parsed;
+    recipe = resolved.recipe;
+  } catch (err) {
+    const { providerId = 'unknown' } = (() => {
+      try { return parseModelId(modelStr); } catch { return { providerId: 'unknown' }; }
+    })();
+    return {
+      ok: false,
+      reason: 'unknown_provider',
+      model: modelStr,
+      provider: providerId,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const tp = recipe.touchpoints.chat;
+  if (!tp) {
+    return {
+      ok: false,
+      reason: 'no_touchpoint',
+      model: modelStr,
+      provider: parsed.providerId,
+      recipeId: recipe.id,
+    };
+  }
+
+  const isUserProvided = (tp as any).user_provided_models === true;
+  if (
+    Array.isArray(tp.models) &&
+    tp.models.length === 0 &&
+    (recipe.id === 'litellm' || isUserProvided)
+  ) {
+    return {
+      ok: false,
+      reason: 'user_provided_model_unset',
+      model: modelStr,
+      provider: parsed.providerId,
+      recipeId: recipe.id,
+    };
+  }
+
+  const required = recipe.auth_env?.required ?? [];
+  const missing = required.filter(k => !_config!.env[k]);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: 'missing_env',
+      model: modelStr,
+      provider: parsed.providerId,
+      recipeId: recipe.id,
+      missingEnvVars: missing,
+    };
+  }
+
+  return {
+    ok: true,
+    model: modelStr,
+    provider: parsed.providerId,
+    recipeId: recipe.id,
+  };
+}
+
 /**
  * Check whether a touchpoint can be served given the current config.
  * Replaces scattered `!process.env.OPENAI_API_KEY` checks (Codex C3).
@@ -765,6 +857,8 @@ export function isAvailable(touchpoint: TouchpointKind, modelOverride?: string):
 
   if (touchpoint === 'embedding') return diagnoseEmbedding(modelOverride).ok;
 
+  if (touchpoint === 'chat') return diagnoseChat(modelOverride).ok;
+
   if (!_config) return false;
   try {
     const modelStr =
@@ -772,8 +866,6 @@ export function isAvailable(touchpoint: TouchpointKind, modelOverride?: string):
         ? modelOverride
         : touchpoint === 'expansion'
         ? getExpansionModel()
-        : touchpoint === 'chat'
-        ? getChatModel()
         : touchpoint === 'reranker'
         ? getRerankerModel() ?? null
         : null;

@@ -146,6 +146,23 @@ describe('sources add', () => {
     expect(insert!.params[3]).toBe('{"federated":false}');
   });
 
+  test('--strategy persists source sync strategy', async () => {
+    const { engine, calls } = makeStub({
+      'SELECT id, name, local_path, last_commit, last_sync_at, config, created_at': [{
+        id: 'indicators',
+        name: 'indicators',
+        local_path: '/tmp/indicators',
+        last_commit: null,
+        last_sync_at: null,
+        config: '{"strategy":"auto"}',
+        created_at: new Date(),
+      }],
+    });
+    await runSources(engine, ['add', 'indicators', '--path', '/tmp/indicators', '--strategy', 'auto']);
+    const insert = calls.find(c => c.sql.includes('INSERT INTO sources'));
+    expect(insert!.params[3]).toBe('{"strategy":"auto"}');
+  });
+
   test('rejects overlapping paths (per eng review finding 4.1)', async () => {
     const { engine } = makeStub({
       'SELECT id, local_path FROM sources WHERE local_path': [
@@ -218,6 +235,20 @@ describe('sources default', () => {
     });
     await runSources(engine, ['default', 'gstack']);
     expect(configSet).toEqual([{ key: 'sources.default', value: 'gstack' }]);
+  });
+});
+
+// ── set-strategy ───────────────────────────────────────────
+
+describe('sources set-strategy', () => {
+  test('updates existing source strategy in config jsonb', async () => {
+    const { engine, calls } = makeStub({
+      'SELECT id FROM sources WHERE id = $1 LIMIT 1': [{ id: 'indicators' }],
+    });
+    await runSources(engine, ['set-strategy', 'indicators', 'auto']);
+    const update = calls.find(c => c.sql.includes('UPDATE sources') && c.sql.includes('jsonb_set'));
+    expect(update).toBeDefined();
+    expect(update!.params).toEqual(['auto', 'indicators']);
   });
 });
 

@@ -31,6 +31,9 @@ import {
   removePrefixFromType,
   removeTypeFromPack,
   resolveActivePackNameOnly,
+  locateSchemaPackFile,
+  loadSchemaPackManifestByName,
+  BUNDLED_SCHEMA_PACK_NAMES,
   loadPackFromFile,
   parseSchemaPackManifest,
   runStatsCore,
@@ -179,7 +182,6 @@ async function runActive(_args: string[]): Promise<void> {
 }
 
 function runList(_args: string[]): void {
-  const bundled = ['gbrain-base', 'gbrain-recommended'];
   const installedDir = gbrainPath('schema-packs');
   const installed: string[] = [];
   if (existsSync(installedDir)) {
@@ -194,7 +196,7 @@ function runList(_args: string[]): void {
     }
   }
   console.log('Bundled packs:');
-  for (const name of bundled) console.log(`  ${name}`);
+  for (const name of BUNDLED_SCHEMA_PACK_NAMES) console.log(`  ${name}`);
   if (installed.length > 0) {
     console.log('\nInstalled packs (~/.gbrain/schema-packs/):');
     for (const name of installed) console.log(`  ${name}`);
@@ -217,13 +219,14 @@ async function runShow(args: string[]): Promise<void> {
   const packName = packArg;
   let manifest;
   if (packName) {
-    const path = packPathByName(packName);
-    if (!path) {
+    try {
+      manifest = await loadSchemaPackManifestByName(packName);
+    } catch (e) {
+      if (!(e instanceof UnknownPackError)) throw e;
       console.error(`Unknown pack: ${packName}`);
       console.error('Run `gbrain schema list` to see available packs.');
       process.exit(1);
     }
-    manifest = loadPackFromFile(path);
   } else {
     const pack = await loadActivePack({ cfg: loadConfig(), remote: false });
     manifest = pack.manifest;
@@ -294,26 +297,18 @@ async function runShow(args: string[]): Promise<void> {
   console.log(`Enrichable types: ${manifest.enrichable_types.map(e => e.type).join(', ') || '(none)'}`);
 }
 
-function runValidate(args: string[]): void {
+async function runValidate(args: string[]): Promise<void> {
   const packName = args[0];
-  let path: string | null;
+  const target = packName ?? 'gbrain-base';
+  const path = packPathByName(target);
   if (packName) {
-    path = packPathByName(packName);
-    if (!path) {
-      console.error(`Unknown pack: ${packName}`);
-      process.exit(1);
-    }
-  } else {
-    path = packPathByName('gbrain-base');
-    if (!path) {
-      console.error('No active pack — provide a pack name.');
-      process.exit(1);
-    }
+    // handled below through the shared loader, which also supports
+    // embedded bundled manifests in compiled binaries.
   }
   try {
-    const manifest = loadPackFromFile(path);
+    const manifest = await loadSchemaPackManifestByName(target);
     console.log(`✓ ${manifest.name} v${manifest.version}: valid manifest`);
-    console.log(`  Path: ${path}`);
+    console.log(`  Path: ${path ?? `(bundled:${manifest.name}.yaml)`}`);
     console.log(`  Page types: ${manifest.page_types.length}`);
     console.log(`  Link verbs: ${manifest.link_types.length}`);
     console.log(`  Takes kinds: ${manifest.takes_kinds.length}`);
@@ -327,28 +322,30 @@ function runValidate(args: string[]): void {
       console.error(`✗ Loader error at ${e.path}`);
       console.error(`  ${e.message}`);
       process.exit(1);
+    } else if (e instanceof UnknownPackError) {
+      console.error(`Unknown pack: ${target}`);
+      process.exit(1);
     } else {
       throw e;
     }
   }
 }
 
-function runUse(args: string[]): void {
+async function runUse(args: string[]): Promise<void> {
   const packName = args[0];
   if (!packName) {
     console.error('Usage: gbrain schema use <pack-name>');
     process.exit(2);
   }
-  const path = packPathByName(packName);
-  if (!path) {
-    console.error(`Unknown pack: ${packName}`);
-    console.error('Run `gbrain schema list` to see available packs.');
-    process.exit(1);
-  }
   // Validate before activating — refuse to set a broken pack.
   try {
-    loadPackFromFile(path);
+    await loadSchemaPackManifestByName(packName);
   } catch (e) {
+    if (e instanceof UnknownPackError) {
+      console.error(`Unknown pack: ${packName}`);
+      console.error('Run `gbrain schema list` to see available packs.');
+      process.exit(1);
+    }
     console.error(`Refusing to activate ${packName}: ${(e as Error).message}`);
     process.exit(1);
   }
@@ -366,24 +363,7 @@ function runUse(args: string[]): void {
 }
 
 function packPathByName(name: string): string | null {
-  if (name === 'gbrain-base') {
-    // Resolve bundled YAML — try a few locations.
-    const here = dirname(new URL(import.meta.url).pathname);
-    const candidates = [
-      join(here, '..', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
-      join(here, '..', '..', 'src', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
-    ];
-    for (const c of candidates) {
-      if (existsSync(c)) return c;
-    }
-    return null;
-  }
-  const baseDir = gbrainPath('schema-packs', name);
-  for (const c of ['pack.yaml', 'pack.yml', 'pack.json']) {
-    const candidate = join(baseDir, c);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+  return locateSchemaPackFile(name);
 }
 
 // Test seam — let unit tests inject the locator if needed.

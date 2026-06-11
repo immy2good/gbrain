@@ -154,4 +154,15 @@ describe('whoknows_health doctor check', () => {
       cleanup();
     }
   });
+
+  it('falls back to cwd when module URL is not source-resolvable', () => {
+    try {
+      process.chdir(savedCwd);
+      const fixturePath = resolveWhoknowsFixturePath({}, 'not-a-file-url');
+      expect(fixturePath).toContain('test');
+      expect(fixturePath).toContain('whoknows-eval.jsonl');
+    } finally {
+      cleanup();
+    }
+  });
 });

@@ -92,6 +92,56 @@ describe('loadConfigWithEngine (Phase 4 / F3)', () => {
     expect(merged?.embedding_image_ocr).toBe(true);
   });
 
+  test('DB runtime AI config fills in when file/env did not set it', async () => {
+    const base: GBrainConfig = { engine: 'pglite' };
+    const engine = makeEngine({
+      openai_api_key: 'sk-openai-db',
+      anthropic_api_key: 'sk-anthropic-db',
+      zeroentropy_api_key: 'ze-db',
+      expansion_model: 'openai:gpt-5.2',
+      chat_model: 'ollama:llama3',
+      chat_fallback_chain: '["openai:gpt-5.2","anthropic:claude-sonnet-4-6"]',
+      provider_base_urls: '{"ollama":"http://localhost:11434/v1"}',
+    });
+    const merged = await loadConfigWithEngine(engine, base);
+    expect(merged?.openai_api_key).toBe('sk-openai-db');
+    expect(merged?.anthropic_api_key).toBe('sk-anthropic-db');
+    expect(merged?.zeroentropy_api_key).toBe('ze-db');
+    expect(merged?.expansion_model).toBe('openai:gpt-5.2');
+    expect(merged?.chat_model).toBe('ollama:llama3');
+    expect(merged?.chat_fallback_chain).toEqual(['openai:gpt-5.2', 'anthropic:claude-sonnet-4-6']);
+    expect(merged?.provider_base_urls?.ollama).toBe('http://localhost:11434/v1');
+  });
+
+  test('file/env runtime AI config wins over DB values', async () => {
+    const base: GBrainConfig = {
+      engine: 'pglite',
+      anthropic_api_key: 'sk-file',
+      chat_model: 'anthropic:claude-sonnet-4-6',
+      chat_fallback_chain: ['openai:gpt-5.2'],
+      provider_base_urls: { ollama: 'http://file.example/v1' },
+    };
+    const engine = makeEngine({
+      anthropic_api_key: 'sk-db',
+      chat_model: 'ollama:llama3',
+      chat_fallback_chain: 'ollama:llama3',
+      provider_base_urls: '{"ollama":"http://db.example/v1"}',
+    });
+    const merged = await loadConfigWithEngine(engine, base);
+    expect(merged?.anthropic_api_key).toBe('sk-file');
+    expect(merged?.chat_model).toBe('anthropic:claude-sonnet-4-6');
+    expect(merged?.chat_fallback_chain).toEqual(['openai:gpt-5.2']);
+    expect(merged?.provider_base_urls?.ollama).toBe('http://file.example/v1');
+  });
+
+  test('DB chat_fallback_chain also accepts comma-separated values', async () => {
+    const merged = await loadConfigWithEngine(
+      makeEngine({ chat_fallback_chain: 'ollama:llama3, openai:gpt-5.2' }),
+      { engine: 'pglite' },
+    );
+    expect(merged?.chat_fallback_chain).toEqual(['ollama:llama3', 'openai:gpt-5.2']);
+  });
+
   test('engine.getConfig throwing is non-fatal — file/env config still returned', async () => {
     const base: GBrainConfig = {
       engine: 'pglite',

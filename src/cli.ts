@@ -92,6 +92,8 @@ const CLI_ONLY_SELF_HELP = new Set([
   // `gbrain connect --help` prints its own usage (flags + examples) from
   // runConnect; route around the generic one-line short-circuit.
   'connect',
+  // `gbrain auth --help` must expose token and OAuth client setup flags.
+  'auth',
 ]);
 
 // v0.42 self-upgrade: commands that must NOT trigger the startup update-check

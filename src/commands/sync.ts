@@ -2427,6 +2427,30 @@ export function composeAbortSignals(
   return AbortSignal.any(live);
 }
 
+async function readSourceStrategy(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<'markdown' | 'code' | 'auto' | undefined> {
+  const rows = await engine.executeRaw<{ config: unknown }>(
+    `SELECT config FROM sources WHERE id = $1 LIMIT 1`,
+    [sourceId],
+  );
+  const raw = rows[0]?.config;
+  let config: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      config = JSON.parse(raw);
+    } catch {
+      config = {};
+    }
+  }
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return undefined;
+  const strategy = (config as Record<string, unknown>).strategy;
+  return strategy === 'markdown' || strategy === 'code' || strategy === 'auto'
+    ? strategy
+    : undefined;
+}
+
 export async function runSync(engine: BrainEngine, args: string[]) {
   // v0.40 Federated Sync v2: `gbrain sync trigger` subcommand
   // Routes to runSyncTrigger which queues a 'sync' minion job with
@@ -3162,7 +3186,7 @@ See also:
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, sourceId,
-    strategy: strategyArg, concurrency,
+    strategy: strategyArg ?? await readSourceStrategy(engine, sourceId), concurrency,
     signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
   };
 

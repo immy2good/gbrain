@@ -6,9 +6,9 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { VERSION } from '../version.ts';
+import { gbrainPath } from '../core/config.ts';
 
 // --- Types ---
 
@@ -52,7 +52,7 @@ const RECIPE_META = [
 // --- Persistence ---
 
 function offersPath(): string {
-  return join(process.env.HOME || '', '.gbrain', 'feature-offers.json');
+  return gbrainPath('feature-offers.json');
 }
 
 function loadOffers(): FeatureOffersFile {
@@ -66,11 +66,12 @@ function loadOffers(): FeatureOffersFile {
 
 function saveOffers(offers: FeatureOffersFile) {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(gbrainPath(), { recursive: true });
     writeFileSync(offersPath(), JSON.stringify(offers, null, 2));
   } catch { /* best-effort */ }
 }
+
+export const __testing = { offersPath };
 
 function shouldPitch(rec: FeatureRecommendation, offers: FeatureOffersFile, currentVersion: string): boolean {
   if (rec.priority === 1) return true; // always pitch data quality
@@ -123,7 +124,7 @@ async function scanFeatures(engine: BrainEngine): Promise<FeatureScanResult> {
     }
 
     // Zero timeline
-    if (stats.timeline_entry_count === 0 && stats.page_count > 5) {
+    if (stats.timeline_entry_count === 0 && health.timeline_coverage_score === 0 && stats.page_count > 5) {
       recommendations.push({
         id: 'zero-timeline', priority: 2,
         title: 'Extract Timeline',

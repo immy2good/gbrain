@@ -1,7 +1,15 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { extractTakesFromDb } from '../src/core/cycle/extract-takes.ts';
+import { extractTakesFromPages, parseClaimsJson } from '../src/core/extract-takes-from-pages.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
+import {
+  __setChatTransportForTests,
+  configureGateway,
+  resetGateway,
+  type ChatOpts,
+  type ChatResult,
+} from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 let alicePageId: number;
@@ -113,5 +121,85 @@ describe('extractTakesFromDb', () => {
     const all = await engine.listTakes({ page_id: alicePageId, active: false });
     const allRowNums = all.map(t => t.row_num).sort();
     expect(allRowNums).toContain(3);
+  });
+});
+
+describe('extractTakesFromPages', () => {
+  test('parseClaimsJson parses valid take claims and drops invalid rows', () => {
+    const claims = parseClaimsJson(JSON.stringify([
+      { claim: 'GBrain should prefer configured local chat for bootstrap work.', kind: 'take', weight: 0.8 },
+      { claim: '', kind: 'take', weight: 0.5 },
+      { claim: 'Bad kind', kind: 'story', weight: 0.5 },
+    ]));
+
+    expect(claims).toEqual([
+      {
+        claim: 'GBrain should prefer configured local chat for bootstrap work.',
+        kind: 'take',
+        weight: 0.8,
+      },
+    ]);
+  });
+
+  test('uses configured chat model by default instead of hardcoded Anthropic', async () => {
+    configureGateway({ chat_model: 'ollama:llama3', env: {} });
+    __setChatTransportForTests(async (opts: ChatOpts): Promise<ChatResult> => {
+      if (opts.model?.startsWith('anthropic:')) {
+        throw new Error(`unexpected hardcoded model: ${opts.model}`);
+      }
+      return {
+        text: JSON.stringify([
+          { claim: 'Local chat can bootstrap takes without hosted credentials.', kind: 'take', weight: 0.7 },
+        ]),
+        blocks: [],
+        stopReason: 'end',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+        model: 'ollama:llama3',
+        providerId: 'ollama',
+      };
+    });
+
+    try {
+      const inserted: unknown[] = [];
+      const engine = {
+        async executeRaw() {
+          return [
+            {
+              id: 123,
+              slug: 'concepts/local-chat',
+              source_id: 'default',
+              type: 'concept',
+              compiled_truth: 'Local model bootstrap evidence. '.repeat(20),
+              updated_at: new Date(),
+            },
+          ];
+        },
+        async addTakesBatch(batch: unknown[]) {
+          inserted.push(...batch);
+          return batch.length;
+        },
+      };
+
+      const result = await extractTakesFromPages(engine as never, {
+        bootstrapEnabled: true,
+        maxPages: 1,
+      });
+
+      expect(result).toMatchObject({
+        consent_gate_blocked: false,
+        llm_unavailable: false,
+        pages_scanned: 1,
+        claims_extracted: 1,
+      });
+      expect(inserted.length).toBe(1);
+    } finally {
+      __setChatTransportForTests(null);
+      resetGateway();
+    }
   });
 });

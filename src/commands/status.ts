@@ -30,7 +30,7 @@
  *     operator.
  *
  * --json emits a stable envelope:
- *   { schema_version: 1, sync, cycle, locks?, workers?, queue?, autopilot? }
+ *   { schema_version: 1, readiness, sync, cycle, locks?, workers?, queue?, autopilot? }
  * Sections may be omitted (thin-client mode, --section filter, or
  * section-build failure that didn't break the whole snapshot).
  */
@@ -102,10 +102,36 @@ export interface AutopilotStatus {
   running: boolean;
 }
 
+export interface ReadinessSource {
+  source_id: string;
+  last_sync_at: string | null;
+  freshness_class: 'fresh' | 'stale' | 'severe' | 'unknown';
+  embedding_coverage_pct: number;
+  queue_depth: number;
+  backfill_queued: number;
+  backfill_active: number;
+}
+
+export interface ReadinessQueueState {
+  active: number;
+  waiting: number;
+  failed: number;
+  dead: number;
+}
+
+export interface ReadinessContract {
+  schema_version: 1;
+  mode: 'full' | 'degraded';
+  degraded_reasons: string[];
+  sources: ReadinessSource[];
+  queue_state: ReadinessQueueState | null;
+}
+
 export interface StatusReport {
   schema_version: typeof SCHEMA_VERSION;
   generated_at: string;
   mode: 'local' | 'thin-client';
+  readiness?: ReadinessContract;
   sync?: SyncStatusReport;
   cycle?: CycleSnapshot;
   locks?: LockRow[] | { local_only_remote: true };
@@ -303,6 +329,40 @@ function buildAutopilotStatus(): AutopilotStatus {
 // Orchestrator
 // ---------------------------------------------------------------------------
 
+export function buildReadinessContract(report: Omit<StatusReport, 'readiness'>): ReadinessContract {
+  const degradedReasons: string[] = [];
+  if (!report.sync) degradedReasons.push('sync_unavailable');
+  if (!report.queue || 'local_only_remote' in report.queue) degradedReasons.push('queue_unavailable');
+  if (report.warnings) degradedReasons.push(...report.warnings);
+
+  const sources: ReadinessSource[] = report.sync?.sources.map((source) => ({
+    source_id: source.source_id,
+    last_sync_at: source.last_sync_at,
+    freshness_class: source.staleness_class,
+    embedding_coverage_pct: source.embedding_coverage_pct,
+    queue_depth: source.backfill_queued + source.backfill_active,
+    backfill_queued: source.backfill_queued,
+    backfill_active: source.backfill_active,
+  })) ?? [];
+
+  const queue_state: ReadinessQueueState | null = report.queue && !('local_only_remote' in report.queue)
+    ? {
+        active: report.queue.active,
+        waiting: report.queue.waiting,
+        failed: report.queue.failed,
+        dead: report.queue.dead,
+      }
+    : null;
+
+  return {
+    schema_version: 1,
+    mode: degradedReasons.length === 0 ? 'full' : 'degraded',
+    degraded_reasons: degradedReasons,
+    sources,
+    queue_state,
+  };
+}
+
 interface BuildOpts {
   sections?: Set<Section>;
 }
@@ -355,6 +415,7 @@ async function buildLocalReport(
     report.autopilot = buildAutopilotStatus();
   }
   if (warnings.length > 0) report.warnings = warnings;
+  report.readiness = buildReadinessContract(report);
   return report;
 }
 
@@ -389,6 +450,7 @@ async function buildThinClientReport(
   if (want('queue')) report.queue = { local_only_remote: true };
   if (want('autopilot')) report.autopilot = { local_only_remote: true };
   if (warnings.length > 0) report.warnings = warnings;
+  report.readiness = buildReadinessContract(report);
   return report;
 }
 

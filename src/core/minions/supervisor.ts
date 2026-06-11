@@ -41,7 +41,9 @@ import {
   unlinkSync,
   writeSync,
 } from 'fs';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
+import { homedir } from 'os';
+import { resolveConfigDir, type ConfigDirEnv } from '../config.ts';
 import type { BrainEngine } from '../engine.ts';
 
 export type SupervisorEvent =
@@ -67,7 +69,7 @@ export interface SupervisorOpts {
   concurrency: number;
   /** Queue name (passed to child). Default: 'default'. */
   queue: string;
-  /** PID file path. Default: `${HOME}/.gbrain/supervisor.pid` (parent dir auto-created). */
+  /** PID file path. Default: active gbrain home `supervisor.pid` (parent dir auto-created). */
   pidFile: string;
   /** Max consecutive crashes before giving up. Default: 10. */
   maxCrashes: number;
@@ -126,17 +128,24 @@ export interface SupervisorOpts {
   _backoffFloorMs?: number;
 }
 
-export const DEFAULT_PID_FILE: string = (() => {
-  const envOverride = process.env.GBRAIN_SUPERVISOR_PID_FILE;
-  if (envOverride && envOverride.length > 0) return envOverride;
-  const home = process.env.HOME ?? '/tmp';
-  return `${home}/.gbrain/supervisor.pid`;
-})();
+export type SupervisorPidFileEnv = ConfigDirEnv & {
+  GBRAIN_SUPERVISOR_PID_FILE?: string;
+};
 
-const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
+export function resolveSupervisorPidFile(
+  env: SupervisorPidFileEnv = process.env,
+  homeDir: string = homedir(),
+): string {
+  const envOverride = env.GBRAIN_SUPERVISOR_PID_FILE;
+  if (envOverride && envOverride.length > 0) return envOverride;
+  return join(resolveConfigDir(env, homeDir), 'supervisor.pid');
+}
+
+export const DEFAULT_PID_FILE: string = resolveSupervisorPidFile();
+
+const DEFAULTS: Omit<SupervisorOpts, 'cliPath' | 'pidFile'> = {
   concurrency: 2,
   queue: 'default',
-  pidFile: DEFAULT_PID_FILE,
   maxCrashes: 10,
   healthInterval: 60_000,
   allowShellJobs: false,
@@ -308,7 +317,7 @@ export class MinionSupervisor {
 
   constructor(engine: BrainEngine, opts: Partial<SupervisorOpts> & { cliPath: string }) {
     this.engine = engine;
-    this.opts = { ...DEFAULTS, ...opts };
+    this.opts = { pidFile: resolveSupervisorPidFile(), ...DEFAULTS, ...opts };
 
     // issue #1678 (Codex #4): when the caller didn't pin an explicit cap,
     // auto-size cgroup-aware instead of the flat DEFAULTS.maxRssMb footgun.

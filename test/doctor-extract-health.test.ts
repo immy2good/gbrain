@@ -25,6 +25,7 @@ afterAll(async () => {
 });
 
 async function clearRollup() {
+  await engine.executeRaw('DELETE FROM pages', []);
   await engine.executeRaw('DELETE FROM extract_rollup_7d', []);
 }
 
@@ -73,8 +74,50 @@ describe('computeExtractHealthCheck — WARN paths', () => {
     expect((check.details as any)?.kinds[0].halt_rate).toBe(0.5);
   });
 
+  test('atoms halt-rate history is OK after backlog is fully drained', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'default', CURRENT_DATE, 0.50, 0, 0, 2, 10, 0, NOW())`,
+      [],
+    );
+
+    const check = await computeExtractHealthCheck(engine);
+
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('historical atoms halt rate');
+    expect((check.details as any)?.atoms_backlog).toBe(0);
+  });
+
+  test('atoms halt-rate history still WARNs when atom backlog remains', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at)
+       VALUES ('article-needs-atoms', 'default', 'article', 'Article', $1, '', '{}'::jsonb, 'hash-needs-atoms', NOW(), NOW())`,
+      ['x'.repeat(600)],
+    );
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'default', CURRENT_DATE, 0.50, 0, 0, 2, 10, 0, NOW())`,
+      [],
+    );
+
+    const check = await computeExtractHealthCheck(engine);
+
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('halt rate');
+    expect((check.details as any)?.atoms_backlog).toBe(1);
+  });
+
   test('multiple kinds with high halt rate: top-3 listed in message', async () => {
     await clearRollup();
+    for (let i = 0; i < 11; i++) {
+      await engine.executeRaw(
+        `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at)
+         VALUES ($1, 'default', 'article', $2, $3, '', '{}'::jsonb, $4, NOW(), NOW())`,
+        [`multi-kind-article-needs-atoms-${i}`, `Article ${i}`, 'x'.repeat(600), `multi-kind-hash-${i}`],
+      );
+    }
     await engine.executeRaw(
       `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
        VALUES
@@ -109,7 +152,7 @@ describe('computeExtractHealthCheck — WARN paths', () => {
     await clearRollup();
     await engine.executeRaw(
       `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
-       VALUES ('atoms', 'default', CURRENT_DATE, 0.20, 0, 0, 5, 5, 3, NOW())`,
+       VALUES ('facts.conversation', 'default', CURRENT_DATE, 0.20, 0, 0, 5, 5, 3, NOW())`,
       [],
     );
     const check = await computeExtractHealthCheck(engine);

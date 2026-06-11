@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { buildSyncManifest, isSyncable, pathToSlug, pruneDir, isCodeFilePath } from '../src/core/sync.ts';
-import { buildAutoEmbedArgs, buildGitInvocation } from '../src/commands/sync.ts';
+import { collectSyncableFiles } from '../src/commands/import.ts';
+import { buildAutoEmbedArgs, buildGitInvocation, runSync } from '../src/commands/sync.ts';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
@@ -113,11 +114,20 @@ describe('isSyncable', () => {
     expect(isSyncable('node_modules/some-pkg/docs/api.md')).toBe(false);
     expect(isSyncable('apps/web/node_modules/dep/notes.md')).toBe(false);
   });
+
+  test('rejects vendor paths at any depth', () => {
+    expect(isSyncable('vendor/aws/aws-sdk-php/CHANGELOG.md')).toBe(false);
+    expect(isSyncable('apps/api/vendor/package/docs/notes.md')).toBe(false);
+  });
 });
 
 describe('pruneDir', () => {
   test('blocks node_modules (no leading dot, the latent-bug case)', () => {
     expect(pruneDir('node_modules')).toBe(false);
+  });
+
+  test('blocks vendor dependency directories', () => {
+    expect(pruneDir('vendor')).toBe(false);
   });
 
   test('blocks dot-prefix dirs (.git, .obsidian, .raw, .cache, etc.)', () => {
@@ -148,6 +158,26 @@ describe('pruneDir', () => {
 
   test('empty string returns true (defensive default)', () => {
     expect(pruneDir('')).toBe(true);
+  });
+});
+
+describe('collectSyncableFiles', () => {
+  test('does not descend into vendor dependency directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-sync-vendor-'));
+    try {
+      mkdirSync(join(root, 'vendor', 'aws'), { recursive: true });
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'vendor', 'aws', 'CHANGELOG.md'), '# vendor noise\n');
+      writeFileSync(join(root, 'docs', 'note.md'), '# real note\n');
+
+      const files = collectSyncableFiles(root, { strategy: 'markdown' })
+        .map((file) => file.replace(/\\/g, '/'));
+
+      expect(files.some((file) => file.includes('/vendor/'))).toBe(false);
+      expect(files.some((file) => file.endsWith('/docs/note.md'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -345,6 +375,28 @@ describe('performSync dry-run never writes', () => {
     // Bookmark NOT set — this is the regression the guard enforces.
     expect(await engine.getConfig('sync.last_commit')).toBeNull();
     expect(await engine.getConfig('sync.repo_path')).toBeNull();
+  });
+
+  test('single-source sync uses persisted source strategy when no CLI strategy is passed', async () => {
+    mkdirSync(join(repoPath, 'Experts'), { recursive: true });
+    writeFileSync(join(repoPath, 'Experts/BananaEA.mq4'), 'int OnInit() { return 0; }\n');
+    execSync('git add -A && git commit -m "add mql"', { cwd: repoPath, stdio: 'pipe' });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('indicators', 'indicators', $1, '{"strategy":"auto"}'::jsonb)`,
+      [repoPath],
+    );
+
+    const messages: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { messages.push(args.map(String).join(' ')); };
+    try {
+      await runSync(engine, ['--source', 'indicators', '--full', '--dry-run', '--no-pull', '--no-embed']);
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(messages.some(m => m.includes('Full-sync dry run (strategy=auto): 3 file(s)'))).toBe(true);
   });
 
   test('first sync without origin skips git pull noise and uses local working tree', async () => {

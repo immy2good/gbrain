@@ -240,3 +240,46 @@ export function summarizeCrashes(events: SupervisorEmission[]): CrashSummary {
   }
   return summary;
 }
+
+export interface SupervisorGenerationSummary {
+  /** Crash/clean-exit summary across the full caller-provided window. */
+  history: CrashSummary;
+  /** Crash/clean-exit summary from the latest started event onward. */
+  current: CrashSummary;
+  /** Latest supervisor started timestamp, or null when no start event exists. */
+  last_start: string | null;
+  /** Events from latest started event onward. Falls back to all events if no start exists. */
+  events_since_last_start: SupervisorEmission[];
+}
+
+/**
+ * Split supervisor audit history into "current generation" and historical
+ * 24h context. A running, freshly restarted supervisor should not stay yellow
+ * for crashes from an older binary/generation, but the historical count still
+ * belongs in details for investigation.
+ */
+export function summarizeCurrentSupervisorGeneration(
+  events: SupervisorEmission[],
+): SupervisorGenerationSummary {
+  let lastStartIndex = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]?.event === 'started') {
+      lastStartIndex = i;
+      break;
+    }
+  }
+
+  const eventsSinceLastStart = lastStartIndex >= 0
+    ? events.slice(lastStartIndex)
+    : events;
+  const lastStart = lastStartIndex >= 0
+    ? events[lastStartIndex]?.ts ?? null
+    : null;
+
+  return {
+    history: summarizeCrashes(events),
+    current: summarizeCrashes(eventsSinceLastStart),
+    last_start: lastStart,
+    events_since_last_start: eventsSinceLastStart,
+  };
+}

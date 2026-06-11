@@ -243,6 +243,7 @@ function matchesAnyGlob(path: string, patterns?: string[]): boolean {
  */
 const PRUNE_DIR_NAMES = new Set<string>([
   'node_modules',
+  'vendor',
   '.raw',
   'ops',
 ]);

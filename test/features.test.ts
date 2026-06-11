@@ -1,4 +1,8 @@
 import { describe, it, expect } from 'bun:test';
+import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { withEnv } from './helpers/with-env.ts';
 
 // Test that features module exports correctly
 describe('features command', () => {
@@ -10,6 +14,16 @@ describe('features command', () => {
   it('exports featuresTeaserForDoctor', async () => {
     const mod = await import('../src/commands/features.ts');
     expect(typeof mod.featuresTeaserForDoctor).toBe('function');
+  });
+});
+
+describe('feature offer persistence path', () => {
+  it('honors GBRAIN_HOME when HOME is unset instead of writing into cwd', async () => {
+    const mod = await import('../src/commands/features.ts');
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-features-home-'));
+    await withEnv({ GBRAIN_HOME: home, HOME: undefined }, async () => {
+      expect(mod.__testing.offersPath()).toBe(join(home, '.gbrain', 'feature-offers.json'));
+    });
   });
 });
 

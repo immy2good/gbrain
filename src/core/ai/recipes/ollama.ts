@@ -21,6 +21,16 @@ export const ollama: Recipe = {
       // OLLAMA_NUM_PARALLEL config; no static cap to declare. v0.32 (#779).
       no_batch_cap: true,
     },
+    chat: {
+      // Local installs decide which chat models exist. Keep this dynamic so
+      // `ollama:<local-model>` reaches the OpenAI-compatible endpoint.
+      models: [],
+      supports_tools: false,
+      supports_subagent_loop: false,
+      cost_per_1m_input_usd: 0,
+      cost_per_1m_output_usd: 0,
+      price_last_verified: '2026-06-11',
+    },
   },
-  setup_hint: 'Install Ollama from https://ollama.ai, then `ollama pull nomic-embed-text` and `ollama serve`.',
+  setup_hint: 'Install Ollama from https://ollama.ai, then `ollama pull nomic-embed-text`, pull a chat model such as `ollama pull llama3`, and run `ollama serve`.',
 };

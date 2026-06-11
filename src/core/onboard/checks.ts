@@ -129,6 +129,16 @@ export async function checkEntityLinkCoverage(
       remediations: [],
     };
   }
+  if (totalEntities < 100) {
+    return {
+      check: {
+        name: 'entity_link_coverage',
+        status: 'ok',
+        message: `Vacuous: ${totalEntities} entity pages (<100). Entity link coverage not meaningful at this scale.`,
+      },
+      remediations: [],
+    };
+  }
 
   // Decide TABLESAMPLE policy (PG only, when >50K entities)
   const useSample = engine.kind === 'postgres' && totalEntities > 50_000;
@@ -221,6 +231,16 @@ export async function checkTimelineCoverage(
   if (totalEntities === 0) {
     return {
       check: { name: 'timeline_coverage', status: 'ok', message: 'No entity pages — coverage check vacuous' },
+      remediations: [],
+    };
+  }
+  if (totalEntities < 100) {
+    return {
+      check: {
+        name: 'timeline_coverage',
+        status: 'ok',
+        message: `Vacuous: ${totalEntities} entity pages (<100). Timeline coverage not meaningful at this scale.`,
+      },
       remediations: [],
     };
   }
@@ -393,7 +413,8 @@ export async function checkPackUpgradeAvailable(
     try {
       dbConfig = (await engine.getConfig('schema_pack')) ?? undefined;
     } catch { /* engine.config may not exist on very old brains */ }
-    const active = await loadActivePack({ cfg: null, remote: false, dbConfig })
+    const { loadConfig } = await import('../config.ts');
+    const active = await loadActivePack({ cfg: loadConfig(), remote: false, dbConfig })
       .catch(() => null);
     if (!active) {
       return {
@@ -467,7 +488,8 @@ export async function checkTypeProliferation(
     try {
       dbConfig = (await engine.getConfig('schema_pack')) ?? undefined;
     } catch { /* tolerate pre-config brains */ }
-    const active = await loadActivePack({ cfg: null, remote: false, dbConfig })
+    const { loadConfig } = await import('../config.ts');
+    const active = await loadActivePack({ cfg: loadConfig(), remote: false, dbConfig })
       .catch(() => null);
     if (active) declared = active.manifest.page_types.length;
   } catch {

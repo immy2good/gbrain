@@ -79,6 +79,24 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.remaining).toBe(5);
   });
 
+  it('carries batch failures when extraction makes no progress', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 5,
+        runBatch: async () => ({
+          extracted: 0,
+          skipped: 0,
+          failures: [{ source: 'page-a', error: 'missing model token' }],
+        }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.stopped).toBe('no_progress');
+    expect(result.failures).toEqual([{ source: 'page-a', error: 'missing model token' }]);
+  });
+
   it('propagates a busy-lock error (caller reports cycle_already_running)', async () => {
     class FakeBusy extends Error {}
     await expect(

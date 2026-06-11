@@ -477,9 +477,10 @@ export function loadConfig(): GBrainConfig | null {
  * Precedence: env > file > DB > defaults. Env stays the operator escape hatch;
  * file is the durable per-machine config; DB is the user-mutable runtime knob.
  *
- * Today only the v0.27.1 multimodal flags participate in DB-merge. Existing
- * fields (embedding_model, etc.) keep their file/env-only loading because they
- * size the schema and must be stable across engine connect.
+ * Runtime AI/auth fields also participate in DB-merge so
+ * `gbrain config set chat_model ...` and stored provider keys affect the
+ * gateway. Schema-sizing fields (embedding_model, embedding_dimensions) keep
+ * file/env-only loading because they must stay stable across engine connect.
  */
 export async function loadConfigWithEngine(
   engine: { getConfig(key: string): Promise<string | null | undefined> },
@@ -524,6 +525,13 @@ export async function loadConfigWithEngine(
   const dbMultimodalModel = await dbStr('embedding_multimodal_model');
   const dbOcr = await dbBool('embedding_image_ocr');
   const dbOcrModel = await dbStr('embedding_image_ocr_model');
+  const dbOpenAiKey = await dbStr('openai_api_key');
+  const dbAnthropicKey = await dbStr('anthropic_api_key');
+  const dbZeroEntropyKey = await dbStr('zeroentropy_api_key');
+  const dbExpansionModel = await dbStr('expansion_model');
+  const dbChatModel = await dbStr('chat_model');
+  const dbChatFallbackChain = await dbStr('chat_fallback_chain');
+  const dbProviderBaseUrls = await dbStr('provider_base_urls');
   // v0.36 (D7) — embedding-column registry merge. Stored as JSON string in
   // the config table. Parse + shape-check here; full registry validation
   // (regex on keys, type/dim/provider field shapes) runs in the resolver at
@@ -535,6 +543,45 @@ export async function loadConfigWithEngine(
   // sync loadConfig() already setting the field. For each flag, prefer the
   // existing fileConfig value when defined; otherwise fall through to DB.
   const merged: GBrainConfig = { ...fileConfig };
+  if (merged.openai_api_key === undefined && dbOpenAiKey !== undefined) {
+    merged.openai_api_key = dbOpenAiKey;
+  }
+  if (merged.anthropic_api_key === undefined && dbAnthropicKey !== undefined) {
+    merged.anthropic_api_key = dbAnthropicKey;
+  }
+  if (merged.zeroentropy_api_key === undefined && dbZeroEntropyKey !== undefined) {
+    merged.zeroentropy_api_key = dbZeroEntropyKey;
+  }
+  if (merged.expansion_model === undefined && dbExpansionModel !== undefined) {
+    merged.expansion_model = dbExpansionModel;
+  }
+  if (merged.chat_model === undefined && dbChatModel !== undefined) {
+    merged.chat_model = dbChatModel;
+  }
+  if (merged.chat_fallback_chain === undefined && dbChatFallbackChain !== undefined) {
+    try {
+      const parsed = JSON.parse(dbChatFallbackChain);
+      if (Array.isArray(parsed) && parsed.every(v => typeof v === 'string')) {
+        merged.chat_fallback_chain = parsed.filter(Boolean);
+      } else {
+        console.warn('[gbrain] config: chat_fallback_chain DB value is not a JSON string array; ignoring');
+      }
+    } catch {
+      merged.chat_fallback_chain = dbChatFallbackChain.split(',').map(s => s.trim()).filter(Boolean);
+    }
+  }
+  if (merged.provider_base_urls === undefined && dbProviderBaseUrls !== undefined) {
+    try {
+      const parsed = JSON.parse(dbProviderBaseUrls);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        merged.provider_base_urls = parsed as Record<string, string>;
+      } else {
+        console.warn('[gbrain] config: provider_base_urls DB value is not a JSON object; ignoring');
+      }
+    } catch (err) {
+      console.warn(`[gbrain] config: provider_base_urls DB value is not valid JSON; ignoring (${(err as Error).message})`);
+    }
+  }
   if (merged.embedding_multimodal === undefined && dbMultimodal !== undefined) {
     merged.embedding_multimodal = dbMultimodal;
   }
@@ -744,6 +791,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'models.chat',
   'models.eval.longmemeval',
   'facts.extraction_model',
+  // Takes extraction consent gates
+  'takes.bootstrap_enabled',
+  'takes.autopilot_allowed',
   // Dream cycle config
   'dream.synthesize.session_corpus_dir',
   'dream.synthesize.meeting_transcripts_dir',
@@ -877,12 +927,16 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
   };
 }
 
-export function configDir(): string {
+export type ConfigDirEnv = Record<string, string | undefined> & {
+  GBRAIN_HOME?: string;
+};
+
+export function resolveConfigDir(env: ConfigDirEnv = process.env, homeDir: string = homedir()): string {
   // Allow override for tests, Docker, and multi-tenant deployments.
   // GBRAIN_HOME is a parent dir; we always append '.gbrain' ourselves so
   // setting GBRAIN_HOME=/tmp/x yields configDir() === '/tmp/x/.gbrain'.
   // Validates the override: must be absolute, no '..' segments.
-  const override = process.env.GBRAIN_HOME;
+  const override = env.GBRAIN_HOME;
   if (override && override.trim()) {
     const trimmed = override.trim();
     if (!isAbsolute(trimmed)) {
@@ -893,7 +947,11 @@ export function configDir(): string {
     }
     return join(trimmed, '.gbrain');
   }
-  return join(homedir(), '.gbrain');
+  return join(homeDir, '.gbrain');
+}
+
+export function configDir(): string {
+  return resolveConfigDir();
 }
 
 export function configPath(): string {

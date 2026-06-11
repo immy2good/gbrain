@@ -16,6 +16,7 @@ import { VERSION } from '../version.ts';
 import { loadConfig } from '../core/config.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
 import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
+import { recordUpgradeRecovery } from './upgrade.ts';
 
 /** Bug 3 — max consecutive partials before we wedge a migration. */
 const MAX_CONSECUTIVE_PARTIALS = 3;
@@ -420,6 +421,9 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
   const toRun: Migration[] = [...plan.partial, ...plan.pending];
   if (toRun.length === 0) {
     console.log('All migrations up to date.');
+    if (plan.wedged.length === 0) {
+      recordUpgradeRecovery({ phase: 'apply-migrations' });
+    }
     process.exit(0);
   }
 
@@ -432,6 +436,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
   // surface the error and DO NOT proceed to the next migration (a silent
   // ledger drop was the root cause of the original infinite-retry symptom).
   let failed = false;
+  let partial = false;
   for (const m of toRun) {
     console.log(`\n=== Applying migration v${m.version}: ${m.featurePitch.headline} ===`);
     try {
@@ -478,6 +483,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
       }
 
       if (result.status === 'partial') {
+        partial = true;
         console.log(`Migration v${m.version} finished as PARTIAL. Re-run \`gbrain apply-migrations --yes\` after resolving any pending host-work items.`);
       } else {
         console.log(`Migration v${m.version} complete.`);
@@ -495,6 +501,9 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
   }
 
   if (failed) process.exit(1);
+  if (!partial && plan.wedged.length === 0) {
+    recordUpgradeRecovery({ phase: 'apply-migrations' });
+  }
 }
 
 /** Exported for unit tests only. Do not use from production code. */

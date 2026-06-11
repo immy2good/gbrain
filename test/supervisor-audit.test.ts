@@ -17,6 +17,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   isCrashExit,
   summarizeCrashes,
+  summarizeCurrentSupervisorGeneration,
   type CrashSummary,
 } from '../src/core/minions/handlers/supervisor-audit.ts';
 import type { SupervisorEmission } from '../src/core/minions/supervisor.ts';
@@ -197,5 +198,43 @@ describe('summarizeCrashes — aggregation', () => {
     expect(summary.total).toBe(1);
     expect(summary.by_cause.legacy).toBe(1);
     expect(summary.clean_exits).toBe(0);
+  });
+});
+
+describe('summarizeCurrentSupervisorGeneration', () => {
+  test('separates stale pre-restart crashes from current generation health', () => {
+    const result = summarizeCurrentSupervisorGeneration([
+      evt('started', { ts: '2026-06-11T10:00:00Z', supervisor_pid: 1 }),
+      evt('worker_exited', {
+        ts: '2026-06-11T10:10:00Z',
+        supervisor_pid: 1,
+        likely_cause: 'unknown',
+        code: 129,
+      }),
+      evt('started', { ts: '2026-06-11T16:00:00Z', supervisor_pid: 2 }),
+      evt('worker_spawned', { ts: '2026-06-11T16:00:01Z', supervisor_pid: 2, pid: 99 }),
+    ]);
+
+    expect(result.last_start).toBe('2026-06-11T16:00:00Z');
+    expect(result.history.total).toBe(1);
+    expect(result.current.total).toBe(0);
+    expect(result.events_since_last_start.map((e) => e.event)).toEqual(['started', 'worker_spawned']);
+  });
+
+  test('includes crashes after the latest start in current generation', () => {
+    const result = summarizeCurrentSupervisorGeneration([
+      evt('started', { ts: '2026-06-11T16:00:00Z', supervisor_pid: 2 }),
+      evt('worker_spawned', { ts: '2026-06-11T16:00:01Z', supervisor_pid: 2, pid: 99 }),
+      evt('worker_exited', {
+        ts: '2026-06-11T16:02:00Z',
+        supervisor_pid: 2,
+        likely_cause: 'runtime_error',
+        code: 1,
+      }),
+    ]);
+
+    expect(result.history.total).toBe(1);
+    expect(result.current.total).toBe(1);
+    expect(result.current.by_cause.runtime_error).toBe(1);
   });
 });

@@ -91,11 +91,20 @@ export {
 export {
   loadActivePack,
   resolveActivePackNameOnly,
+  locateSchemaPackFile,
+  loadSchemaPackManifestByName,
   __setPackLocatorForTests,
   _resetPackLocatorForTests,
   type LoadActivePackInput,
   type PackLocator,
 } from './load-active.ts';
+
+export {
+  BUNDLED_SCHEMA_PACK_NAMES,
+  bundledSchemaPackText,
+  isBundledSchemaPackName,
+  type BundledSchemaPackName,
+} from './bundled-manifests.ts';
 
 export {
   SchemaPackTrustGateError,

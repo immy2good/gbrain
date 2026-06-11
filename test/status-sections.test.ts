@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { parseSectionFlag, runStatus } from '../src/commands/status.ts';
+import { buildReadinessContract, parseSectionFlag, runStatus } from '../src/commands/status.ts';
 
 describe('parseSectionFlag', () => {
   test('no --section flag → undefined (all sections)', () => {
@@ -72,5 +72,89 @@ describe('runStatus exit codes', () => {
     // Without a config + engine, status can't build the local snapshot.
     expect(r.exitCode).toBe(1);
     expect(captured).toMatch(/snapshot failed|no engine connected/);
+  });
+});
+
+describe('buildReadinessContract', () => {
+  test('returns full mode with stable source and queue fields', () => {
+    const readiness = buildReadinessContract({
+      schema_version: 1,
+      generated_at: '2026-06-11T14:30:00.000Z',
+      mode: 'local',
+      sync: {
+        schema_version: 1,
+        generated_at: '2026-06-11T14:30:00.000Z',
+        unacknowledged_failures: 0,
+        embedding_column: 'embedding',
+        sources: [
+          {
+            source_id: 'itradeaims-agent-workflows',
+            name: 'itradeaims-agent-workflows',
+            local_path: 'D:/itrad/repos/itradeaims-agent-workflows',
+            sync_enabled: true,
+            last_sync_at: '2026-06-11T13:30:00.000Z',
+            staleness_hours: 1,
+            staleness_class: 'fresh',
+            last_commit: 'abc123',
+            pages: 42,
+            chunks_total: 100,
+            chunks_unembedded: 0,
+            embedding_coverage_pct: 100,
+            backfill_queued: 2,
+            backfill_active: 1,
+            backfill_last_completed_at: '2026-06-11T13:29:00.000Z',
+          },
+        ],
+      },
+      queue: {
+        active: 1,
+        waiting: 2,
+        completed: 10,
+        failed: 0,
+        dead: 0,
+      },
+    });
+
+    expect(readiness).toEqual({
+      schema_version: 1,
+      mode: 'full',
+      degraded_reasons: [],
+      sources: [
+        {
+          source_id: 'itradeaims-agent-workflows',
+          last_sync_at: '2026-06-11T13:30:00.000Z',
+          freshness_class: 'fresh',
+          embedding_coverage_pct: 100,
+          queue_depth: 3,
+          backfill_queued: 2,
+          backfill_active: 1,
+        },
+      ],
+      queue_state: {
+        active: 1,
+        waiting: 2,
+        failed: 0,
+        dead: 0,
+      },
+    });
+  });
+
+  test('returns degraded mode with explicit reasons when required telemetry is missing', () => {
+    const readiness = buildReadinessContract({
+      schema_version: 1,
+      generated_at: '2026-06-11T14:30:00.000Z',
+      mode: 'local',
+      warnings: ['sync section failed: timeout'],
+      queue: { local_only_remote: true },
+    });
+
+    expect(readiness.mode).toBe('degraded');
+    expect(readiness.degraded_reasons).toEqual([
+      'sync_unavailable',
+      'queue_unavailable',
+      'sync section failed: timeout',
+    ]);
+    expect(readiness.sources).toEqual([]);
+    expect(readiness.queue_state).toBeNull();
   });
 });

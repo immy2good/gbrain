@@ -60,6 +60,17 @@ describe('WARN-5 — `gbrain capture --help` reaches the detailed HELP constant'
   });
 });
 
+describe('auth help discoverability', () => {
+  test('`gbrain auth --help` reaches the auth subcommand help', () => {
+    const { stdout, status } = runCli(['auth', '--help']);
+    expect(status).toBe(0);
+    expect(stdout).toContain('GBrain Token Management');
+    expect(stdout).toContain('gbrain auth register-client <name>');
+    expect(stdout).toContain('--token-endpoint-auth-method');
+    expect(stdout).not.toContain('run gbrain --help for the full command list');
+  });
+});
+
 describe('WARN-6 — main `gbrain --help` lists capture/brainstorm/lsd', () => {
   test('output mentions all three commands by name', () => {
     const { stdout, status } = runCli(['--help']);

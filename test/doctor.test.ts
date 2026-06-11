@@ -6,6 +6,61 @@ describe('doctor command', () => {
     expect(typeof runDoctor).toBe('function');
   });
 
+  test('upgrade_errors ignores failures followed by a recovery marker', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const { readLatestActionableUpgradeError } = await import('../src/commands/doctor.ts');
+
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-upgrade-errors-'));
+    const dir = join(home, '.gbrain');
+    mkdirSync(dir, { recursive: true });
+    const errPath = join(dir, 'upgrade-errors.jsonl');
+    writeFileSync(errPath, [
+      JSON.stringify({
+        ts: '2026-06-05T17:10:28.099Z',
+        phase: 'post-upgrade',
+        from_version: '0.42.25.0',
+        to_version: '0.42.26.0',
+        error: 'Command failed: gbrain post-upgrade',
+        hint: 'Run: gbrain apply-migrations --yes',
+      }),
+      JSON.stringify({
+        ts: '2026-06-11T19:30:00.000Z',
+        status: 'recovered',
+        phase: 'apply-migrations',
+      }),
+    ].join('\n') + '\n');
+
+    expect(readLatestActionableUpgradeError(home)).toBeNull();
+
+    writeFileSync(errPath, [
+      JSON.stringify({
+        ts: '2026-06-05T17:10:28.099Z',
+        phase: 'post-upgrade',
+        from_version: '0.42.25.0',
+        to_version: '0.42.26.0',
+        error: 'Command failed: gbrain post-upgrade',
+        hint: 'Run: gbrain apply-migrations --yes',
+      }),
+      JSON.stringify({
+        ts: '2026-06-11T19:30:00.000Z',
+        status: 'recovered',
+        phase: 'apply-migrations',
+      }),
+      JSON.stringify({
+        ts: '2026-06-11T19:31:00.000Z',
+        phase: 'post-upgrade',
+        from_version: '0.42.26.0',
+        to_version: '0.42.27.0',
+        error: 'Command failed: gbrain post-upgrade',
+        hint: 'Run: gbrain apply-migrations --yes',
+      }),
+    ].join('\n') + '\n');
+
+    expect(readLatestActionableUpgradeError(home)?.to_version).toBe('0.42.27.0');
+  });
+
   test('LATEST_VERSION is importable from migrate', async () => {
     const { LATEST_VERSION } = await import('../src/core/migrate.ts');
     expect(typeof LATEST_VERSION).toBe('number');
@@ -585,6 +640,22 @@ describe('v0.32.4 — sync_freshness check', () => {
   });
 });
 
+describe('multi_source_drift doctor wiring', () => {
+  test('doctor passes documented GBRAIN_DRIFT_* env overrides to findMisroutedPages', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const localBlockStart = source.indexOf('// 3b-multi-source. Multi-source drift');
+    expect(localBlockStart).toBeGreaterThan(0);
+    const localBlock = source.slice(
+      localBlockStart,
+      source.indexOf('// 3c. Orphan clone temp dirs', localBlockStart),
+    );
+    expect(localBlock).toContain('GBRAIN_DRIFT_LIMIT');
+    expect(localBlock).toContain('GBRAIN_DRIFT_TIMEOUT_MS');
+    expect(localBlock).toContain('limit:');
+    expect(localBlock).toContain('timeoutMs:');
+  });
+});
+
 // ============================================================================
 // v0.41.27.0 — sync_freshness git short-circuit (D4 + D6 + D7)
 // ============================================================================
@@ -963,10 +1034,10 @@ describe('v0.41.32.0 — commit-relative staleness', () => {
 // These tests pin the read-side wiring so doctor and `gbrain jobs supervisor
 // status` (jobs.ts:805) cannot drift: both go through `summarizeCrashes`.
 describe('supervisor crash classifier wiring (v0.35.x)', () => {
-  test('doctor.ts uses summarizeCrashes — no ad-hoc worker_exited filter', async () => {
+  test('doctor.ts uses current-generation supervisor summary — no ad-hoc worker_exited filter', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     // Wired to the shared helper.
-    expect(source).toContain('summarizeCrashes');
+    expect(source).toContain('summarizeCurrentSupervisorGeneration');
     // The pre-fix ad-hoc filter pattern must NOT survive. The exact buggy
     // expression was `events.filter(e => e.event === 'worker_exited').length`.
     // Match the structural fingerprint, not whitespace.
@@ -975,14 +1046,14 @@ describe('supervisor crash classifier wiring (v0.35.x)', () => {
     );
   });
 
-  test('doctor.ts warn threshold dropped from >3 to >=1', async () => {
+  test('doctor.ts warns on any current-generation crash', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     // The pre-fix `crashes24h > 3` threshold made sense only because the
     // counter was over-counting clean exits. Under accurate counts, any real
-    // crash is signal — threshold lands at `>=1`.
-    expect(source).toMatch(/crashes24h\s*>=\s*1/);
+    // current-generation crash is signal — threshold lands at `>=1`.
+    expect(source).toMatch(/crashesSinceLastStart\s*>=\s*1/);
     // The old `> 3` predicate must not survive on the supervisor check.
-    expect(source).not.toMatch(/crashes24h\s*>\s*3/);
+    expect(source).not.toMatch(/crashes(?:24h|SinceLastStart)\s*>\s*3/);
   });
 
   test('doctor.ts ok + warn messages include per-cause breakdown and clean_exits_24h', async () => {
@@ -993,7 +1064,9 @@ describe('supervisor crash classifier wiring (v0.35.x)', () => {
     expect(source).toContain('oom=');
     expect(source).toContain('unknown=');
     expect(source).toContain('legacy=');
-    // Clean-exit count surfaces alongside crash count for transparency.
+    // Clean-exit count surfaces alongside current + historical crash counts for transparency.
+    expect(source).toContain('crashes_since_last_start');
+    expect(source).toContain('historical_crashes_24h');
     expect(source).toContain('clean_exits_24h=');
   });
 
@@ -1098,6 +1171,33 @@ describe('v0.40.4 — graph_signals_coverage check', () => {
     expect(check.status).toBe('warn');
     expect(check.message).toContain('0.0%');
     expect(check.message).toContain('gbrain extract all');
+  });
+
+  test('graph_signals enabled + sparse links but extraction current → ok with corpus-sparse note', async () => {
+    for (let i = 0; i < 120; i++) {
+      await engine.putPage(`page/${i}`, { type: 'note', title: `page-${i}`, compiled_truth: 'body' });
+    }
+    await engine.executeRaw(`UPDATE pages SET links_extracted_at = NOW()`);
+
+    const check = await checkGraphSignalsCoverage(engine);
+
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('0.0%');
+    expect(check.message).toContain('extraction current');
+  });
+
+  test('graph_signals sparse links tolerates stale extraction below the lag warn threshold', async () => {
+    for (let i = 0; i < 120; i++) {
+      await engine.putPage(`page/${i}`, { type: 'note', title: `page-${i}`, compiled_truth: 'body' });
+    }
+    await engine.executeRaw(`UPDATE pages SET links_extracted_at = NOW()`);
+    await engine.executeRaw(`UPDATE pages SET links_extracted_at = NULL WHERE slug IN (SELECT slug FROM pages ORDER BY id LIMIT 6)`);
+
+    const check = await checkGraphSignalsCoverage(engine);
+
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('6/120');
+    expect(check.message).toContain('extraction current');
   });
 
   test('graph_signals enabled + >=30% coverage → ok with metric', async () => {
@@ -1329,4 +1429,83 @@ describe('v0.42 (#1699) — quarantined_pages + flagged_pages checks', () => {
     expect(source).toMatch(/name: 'quarantined_pages'/);
     expect(source).toMatch(/name: 'flagged_pages'/);
   });
+});
+
+describe('doctor health-score regressions', () => {
+  function contentSanitySummary(overrides: Record<string, number> = {}) {
+    return {
+      by_type: {
+        hard_block: 0,
+        quarantine: 0,
+        reject: 0,
+        flag: 0,
+        soft_block: 0,
+        warn: 0,
+        ...overrides,
+      },
+    };
+  }
+
+  test('content sanity historical warnings do not fail a recovered current state', async () => {
+    const { classifyContentSanityAuditStatus } = await import('../src/commands/doctor.ts');
+
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ hard_block: 1 }), 1)).toBe('fail');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ quarantine: 1 }), 1)).toBe('fail');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ reject: 1 }), 1)).toBe('fail');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ warn: 155, soft_block: 1 }), 156)).toBe('warn');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ flag: 1 }), 1)).toBe('warn');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ warn: 155, soft_block: 2 }), 157, 0)).toBe('ok');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary({ warn: 155, soft_block: 2 }), 157, 1)).toBe('warn');
+    expect(classifyContentSanityAuditStatus(contentSanitySummary(), 0)).toBe('ok');
+  });
+
+  async function withSmallEntityBrain() {
+    const { PGLiteEngine } = await import('../src/core/pglite-engine.ts');
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    for (let i = 0; i < 5; i++) {
+      await engine.putPage(`people/person-${i}`, {
+        type: 'person',
+        title: `Person ${i}`,
+        compiled_truth: 'Small sample entity page.',
+        timeline: '',
+        frontmatter: {},
+      });
+    }
+    return engine;
+  }
+
+  test('brain-wide graph coverage is vacuous below 100 entity pages', async () => {
+    const { buildChecks } = await import('../src/commands/doctor.ts');
+    const engine = await withSmallEntityBrain();
+    try {
+      const checks = await buildChecks(engine, ['--json', '--scope=brain']);
+      const graphCoverage = checks.find((check) => check.name === 'graph_coverage');
+
+      expect(graphCoverage).toBeDefined();
+      expect(graphCoverage!.status).toBe('ok');
+      expect(graphCoverage!.message).toMatch(/vacuous/i);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 20_000);
+
+  test('onboard entity and timeline coverage are vacuous below 100 entity pages', async () => {
+    const { checkEntityLinkCoverage, checkTimelineCoverage } = await import('../src/core/onboard/checks.ts');
+    const engine = await withSmallEntityBrain();
+    try {
+      const entityCoverage = await checkEntityLinkCoverage(engine);
+      const timelineCoverage = await checkTimelineCoverage(engine);
+
+      expect(entityCoverage.check.status).toBe('ok');
+      expect(entityCoverage.check.message).toMatch(/vacuous/i);
+      expect(timelineCoverage.check.status).toBe('ok');
+      expect(timelineCoverage.check.message).toMatch(/vacuous/i);
+      expect(entityCoverage.remediations).toHaveLength(0);
+      expect(timelineCoverage.remediations).toHaveLength(0);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 20_000);
 });

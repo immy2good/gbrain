@@ -177,6 +177,6 @@ describe('runApplyMigrations exit codes (v0.36.1.x #1062)', () => {
     const src = readFileSync('src/commands/apply-migrations.ts', 'utf8');
     expect(src).toMatch(/cli\.list\s*\)\s*\{\s*printList\(plan,\s*installed\);\s*process\.exit\(0\);/);
     expect(src).toMatch(/cli\.dryRun\s*\)\s*\{\s*printDryRun\(plan,\s*installed\);\s*process\.exit\(0\);/);
-    expect(src).toMatch(/All migrations up to date[\s\S]{0,80}process\.exit\(0\)/);
+    expect(src).toMatch(/All migrations up to date[\s\S]{0,220}recordUpgradeRecovery\(\{ phase: 'apply-migrations' \}\);[\s\S]{0,80}process\.exit\(0\)/);
   });
 });

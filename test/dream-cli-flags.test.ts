@@ -111,6 +111,7 @@ describe('dream CLI flag wiring', () => {
     test('declares --drain and --window flags', () => {
       expect(dreamSrc).toContain("'--drain'");
       expect(dreamSrc).toContain("'--window'");
+      expect(dreamSrc).toContain("'--all-sources'");
       expect(dreamSrc).toContain('windowSeconds');
     });
 
@@ -128,6 +129,11 @@ describe('dream CLI flag wiring', () => {
       // test/extract-atoms-drain.test.ts ("shared wiring helper holds the cycle lock").
       expect(dreamSrc).toContain('runExtractAtomsDrainForSource');
       expect(dreamSrc).toContain('sourceId: resolvedSourceId');
+    });
+
+    test('all-source drain is explicit and cannot combine with --source', () => {
+      expect(dreamSrc).toContain('countExtractAtomsBacklogBySource');
+      expect(dreamSrc).toContain('--all-sources cannot be combined with --source/--source-id');
     });
 
     test('drain reports remaining + exits non-zero when incomplete', () => {
