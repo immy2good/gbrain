@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
-import { resolveBunGlobalRoot } from '../src/commands/upgrade.ts';
+import { recordUpgradeRecovery, resolveBunGlobalRoot } from '../src/commands/upgrade.ts';
 
 // We can't easily mock process.execPath in bun, so we test the upgrade
 // command's --help output and the detection logic via subprocess
@@ -31,6 +31,26 @@ describe('upgrade command', () => {
     const exitCode = await proc.exited;
     expect(stdout).toContain('Usage: gbrain upgrade');
     expect(exitCode).toBe(0);
+  });
+
+  test('recordUpgradeRecovery appends a recovered marker to upgrade-errors.jsonl', () => {
+    const priorHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-upgrade-recovery-'));
+    try {
+      process.env.HOME = home;
+      recordUpgradeRecovery({ phase: 'apply-migrations' });
+      const lines = readFileSync(join(home, '.gbrain', 'upgrade-errors.jsonl'), 'utf-8')
+        .trim()
+        .split('\n');
+      const record = JSON.parse(lines[0]);
+      expect(record.status).toBe('recovered');
+      expect(record.phase).toBe('apply-migrations');
+      expect(typeof record.ts).toBe('string');
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

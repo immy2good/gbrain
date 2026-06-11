@@ -19,17 +19,19 @@
 import { describe, test, expect, beforeEach, mock } from 'bun:test';
 import {
   configureGateway,
+  diagnoseChat,
   resetGateway,
   isAvailable,
   getChatModel,
   getChatFallbackChain,
+  reconfigureGatewayWithEngine,
 } from '../../src/core/ai/gateway.ts';
 import { parseModelId, resolveRecipe, assertTouchpoint } from '../../src/core/ai/model-resolver.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
 import { listRecipes, getRecipe } from '../../src/core/ai/recipes/index.ts';
 
 describe('chat touchpoint — recipe registry', () => {
-  test('all six chat-capable providers ship a chat touchpoint with supports_subagent_loop', () => {
+  test('hosted chat-capable providers ship a chat touchpoint with supports_subagent_loop', () => {
     const expected = ['anthropic', 'openai', 'google', 'deepseek', 'groq', 'together'];
     for (const id of expected) {
       const r = getRecipe(id);
@@ -38,6 +40,15 @@ describe('chat touchpoint — recipe registry', () => {
       expect(r!.touchpoints.chat!.models.length, `${id} chat models empty`).toBeGreaterThan(0);
       expect(r!.touchpoints.chat!.supports_subagent_loop, `${id} should support subagent loop`).toBe(true);
     }
+  });
+
+  test('Ollama declares dynamic local chat without subagent-loop guarantees', () => {
+    const ollama = getRecipe('ollama');
+    expect(ollama).toBeDefined();
+    expect(ollama!.touchpoints.chat).toBeDefined();
+    expect(ollama!.touchpoints.chat!.models).toEqual([]);
+    expect(ollama!.touchpoints.chat!.supports_tools).toBe(false);
+    expect(ollama!.touchpoints.chat!.supports_subagent_loop).toBe(false);
   });
 
   test('only Anthropic claims supports_prompt_cache=true', () => {
@@ -51,9 +62,8 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('embedding-only providers (voyage, ollama) do NOT declare chat', () => {
+  test('embedding-only providers do NOT declare chat', () => {
     expect(getRecipe('voyage')!.touchpoints.chat).toBeUndefined();
-    expect(getRecipe('ollama')!.touchpoints.chat).toBeUndefined();
   });
 
   test('openai-compat chat recipes have base_url_default', () => {
@@ -110,8 +120,6 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
   test('assertTouchpoint rejects chat on embedding-only providers with a fix hint', () => {
     expect(() => assertTouchpoint(getRecipe('voyage')!, 'chat', 'voyage-3'))
       .toThrow(AIConfigError);
-    expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'nomic-embed-text'))
-      .toThrow(AIConfigError);
   });
 
   test('assertTouchpoint rejects unknown native model with the model list in the fix hint', () => {
@@ -127,6 +135,7 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
   test('assertTouchpoint accepts arbitrary model on openai-compat tier', () => {
     // openai-compat lets users pass models not declared in the recipe (provider may host more)
     expect(() => assertTouchpoint(getRecipe('groq')!, 'chat', 'some-future-model')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'llama3')).not.toThrow();
   });
 });
 
@@ -165,6 +174,20 @@ describe('chat touchpoint — gateway config plumbing', () => {
     expect(getChatFallbackChain()).toEqual([]);
   });
 
+  test('engine reconfigure preserves explicit chat_model over implicit tier default', async () => {
+    configureGateway({
+      chat_model: 'ollama:llama3',
+      env: {},
+    });
+    const engine = {
+      async getConfig() {
+        return null;
+      },
+    };
+    await reconfigureGatewayWithEngine(engine as any);
+    expect(getChatModel()).toBe('ollama:llama3');
+  });
+
   test('isAvailable("chat") returns true when default Anthropic + key present', () => {
     configureGateway({ env: { ANTHROPIC_API_KEY: 'fake' } });
     expect(isAvailable('chat')).toBe(true);
@@ -173,12 +196,27 @@ describe('chat touchpoint — gateway config plumbing', () => {
   test('isAvailable("chat") returns false when configured provider has no key', () => {
     configureGateway({ chat_model: 'openai:gpt-5.2', env: {} });
     expect(isAvailable('chat')).toBe(false);
+    expect(diagnoseChat()).toEqual({
+      ok: false,
+      reason: 'missing_env',
+      model: 'openai:gpt-5.2',
+      provider: 'openai',
+      recipeId: 'openai',
+      missingEnvVars: ['OPENAI_API_KEY'],
+    });
   });
 
   test('isAvailable("chat") returns false on embedding-only chat target', () => {
     // Voyage doesn't expose a chat touchpoint; isAvailable should refuse.
     configureGateway({ chat_model: 'voyage:voyage-3', env: { VOYAGE_API_KEY: 'fake' } });
     expect(isAvailable('chat')).toBe(false);
+    expect(diagnoseChat()).toEqual({
+      ok: false,
+      reason: 'no_touchpoint',
+      model: 'voyage:voyage-3',
+      provider: 'voyage',
+      recipeId: 'voyage',
+    });
   });
 });
 

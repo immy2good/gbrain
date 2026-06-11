@@ -1282,7 +1282,12 @@ export class PostgresEngine implements BrainEngine {
     const sql = this.sql;
     const result = await sql`
       UPDATE sources
-         SET config = COALESCE(config, '{}'::jsonb) || ${sql.json(patch as Parameters<typeof sql.json>[0])}
+         SET config = (
+           CASE
+             WHEN jsonb_typeof(config) = 'object' THEN config
+             ELSE '{}'::jsonb
+           END
+         ) || ${sql.json(patch as Parameters<typeof sql.json>[0])}
        WHERE id = ${sourceId}
     `;
     return (result.count ?? 0) > 0;

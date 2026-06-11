@@ -48,7 +48,7 @@ export interface ExtractTakesFromPagesOpts {
   maxPages?: number;
   /** Owner identifier for the inserted takes. Default 'system'. */
   holder?: string;
-  /** Model override; defaults to facts.extraction_model. */
+  /** Model override; defaults to the configured gateway chat model. */
   model?: string;
   /** Progress hook called per page. */
   onProgress?: (done: number, total: number, claims: number) => void;
@@ -174,7 +174,7 @@ export async function extractTakesFromPages(
     let response: { text: string };
     try {
       response = await chat({
-        model: opts.model ?? 'anthropic:claude-haiku-4-5',
+        model: opts.model,
         system: CLASSIFIER_SYSTEM,
         messages: [
           {

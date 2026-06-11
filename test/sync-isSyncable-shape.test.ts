@@ -29,6 +29,7 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
     { path: 'ops/scratch/note.md', expected: 'pruned-dir', note: 'ops/ is pruned' },
     { path: '.git/notes.md', expected: 'pruned-dir', note: 'hidden dir pruned' },
     { path: 'node_modules/foo/README.md', expected: 'pruned-dir', note: 'node_modules pruned' },
+    { path: 'vendor/aws/aws-sdk-php/CHANGELOG.md', expected: 'pruned-dir', note: 'vendor pruned' },
   ];
 
   for (const c of cases) {

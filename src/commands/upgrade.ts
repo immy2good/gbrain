@@ -243,6 +243,25 @@ export function recordUpgradeError(record: {
   }
 }
 
+export function recordUpgradeRecovery(record: {
+  phase: string;
+}): void {
+  try {
+    const dir = join(process.env.HOME || '', '.gbrain');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'upgrade-errors.jsonl');
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      status: 'recovered',
+      phase: record.phase,
+    }) + '\n';
+    appendFileSync(path, line);
+  } catch {
+    // Recovery markers are best-effort. A failed marker write must not turn
+    // a successful migration recovery into a failed migration command.
+  }
+}
+
 function saveUpgradeState(oldVersion: string, newVersion: string) {
   try {
     const dir = join(process.env.HOME || '', '.gbrain');

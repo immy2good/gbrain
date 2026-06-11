@@ -145,6 +145,30 @@ function _penaltyScore(checks: Check[]): number {
   return Math.max(0, score);
 }
 
+export function classifyContentSanityAuditStatus(summary: {
+  by_type: {
+    hard_block: number;
+    quarantine: number;
+    reject: number;
+    flag: number;
+    soft_block: number;
+    warn: number;
+  };
+}, totalEvents: number, currentActionableIssues?: number): Check['status'] {
+  const hardEvents =
+    summary.by_type.hard_block +
+    summary.by_type.reject;
+  if (hardEvents > 0) return 'fail';
+  if (currentActionableIssues !== undefined) {
+    return currentActionableIssues > 0 ? 'warn' : 'ok';
+  }
+  if (summary.by_type.quarantine > 0) return 'fail';
+  if (totalEvents >= 10 || summary.by_type.quarantine > 0 || summary.by_type.soft_block > 0 || summary.by_type.flag > 0 || summary.by_type.warn > 0) {
+    return 'warn';
+  }
+  return 'ok';
+}
+
 /**
  * Compute the {status, health_score, brain_checks_score, category_scores}
  * headline from a list of checks. Mirrors the calculation in outputResults()
@@ -253,6 +277,18 @@ export function resolveWhoknowsFixturePath(
   } catch {
     // Some bundlers/runtimes may not expose a normal file: import URL.
     // Doctor should surface an override hint instead of fabricating a path.
+  }
+
+  try {
+    let dir = process.cwd();
+    for (let i = 0; i < 10; i++) {
+      if (isGbrainSourceRoot(dir)) return join(dir, WHOKNOWS_FIXTURE_RELATIVE_PATH);
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // Fall through to the override hint.
   }
 
   return null;
@@ -930,6 +966,34 @@ export async function checkContextualRetrievalCoverage(engine: BrainEngine): Pro
       message: `Could not check contextual retrieval coverage: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
+}
+
+export interface UpgradeErrorRecord {
+  ts: string;
+  phase: string;
+  from_version?: string;
+  to_version?: string;
+  hint?: string;
+  status?: string;
+}
+
+export function readLatestActionableUpgradeError(home: string): UpgradeErrorRecord | null {
+  const errPath = join(home, '.gbrain', 'upgrade-errors.jsonl');
+  if (!existsSync(errPath)) return null;
+
+  let latestFailure: UpgradeErrorRecord | null = null;
+  const lines = readFileSync(errPath, 'utf-8').split('\n').filter(l => l.trim());
+  for (const line of lines) {
+    const record = JSON.parse(line) as UpgradeErrorRecord;
+    if (record.status === 'recovered') {
+      latestFailure = null;
+      continue;
+    }
+    if (record.from_version && record.to_version && record.hint) {
+      latestFailure = record;
+    }
+  }
+  return latestFailure;
 }
 
 /**
@@ -1723,6 +1787,21 @@ export async function checkGraphSignalsCoverage(engine: BrainEngine): Promise<Ch
     const pctStr = pct.toFixed(1);
 
     if (pct < 10) {
+      let stalePages: number | null = null;
+      try {
+        stalePages = await engine.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS });
+      } catch {
+        // Preserve the historical warning behavior if the freshness probe is
+        // unavailable; better to ask for extraction than hide a stale graph.
+      }
+      const stalePct = stalePages === null ? null : (stalePages / totalPages) * 100;
+      if (stalePct !== null && stalePct <= EXTRACTION_LAG_WARN_PCT_DEFAULT) {
+        return {
+          name: 'graph_signals_coverage',
+          status: 'ok',
+          message: `${pctStr}% of pages have inbound links (<10%), but link extraction current (${stalePages}/${totalPages} stale, <=${EXTRACTION_LAG_WARN_PCT_DEFAULT}%). Sparse graph signal reflects corpus shape, not stale extraction.`,
+        };
+      }
       return {
         name: 'graph_signals_coverage',
         status: 'warn',
@@ -3037,11 +3116,16 @@ export async function computeExtractAtomsBacklogCheck(
   const name = 'extract_atoms_backlog';
   const approx = 'page backlog only; transcript corpus not counted';
   try {
-    const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
+    const {
+      countExtractAtomsBacklog,
+      countExtractAtomsBacklogBySource,
+    } = await import('../core/cycle/extract-atoms.ts');
     const backlog = await countExtractAtomsBacklog(engine); // brain-wide
     if (backlog === null) {
       return { name, status: 'warn', message: 'backlog query failed (could not count eligible pages)' };
     }
+    const bySource = await countExtractAtomsBacklogBySource(engine);
+    const sourceBreakdown = bySource?.filter((row) => row.count > 0) ?? [];
 
     const { packDeclaresPhase } = await import('../core/cycle.ts');
     let declared = false;
@@ -3058,11 +3142,17 @@ export async function computeExtractAtomsBacklogCheck(
     // The incident: pack does NOT run the phase but a real backlog exists →
     // it will grow forever without a signal. WARN with the drain command.
     if (!declared && backlog > 10) {
-      const fix = 'gbrain dream --phase extract_atoms --drain --window 120 (or declare extract_atoms in your active schema pack)';
+      const fix = 'gbrain dream --phase extract_atoms --drain --all-sources --window 120 (or run with --source <id>, or declare extract_atoms in your active schema pack)';
       return {
         name, status: 'warn',
         message: `${backlog} pages eligible for atom extraction but the active pack does not run extract_atoms — backlog growing. Fix: ${fix}`,
-        details: { backlog, pack_declares_phase: false, fix_hint: fix, known_approximation: approx },
+        details: {
+          backlog,
+          backlog_by_source: sourceBreakdown,
+          pack_declares_phase: false,
+          fix_hint: fix,
+          known_approximation: approx,
+        },
       };
     }
 
@@ -3071,7 +3161,7 @@ export async function computeExtractAtomsBacklogCheck(
       return {
         name, status: 'ok',
         message: `${backlog} page(s) pending; active pack runs extract_atoms each cycle`,
-        details: { backlog, pack_declares_phase: true, known_approximation: approx },
+        details: { backlog, backlog_by_source: sourceBreakdown, pack_declares_phase: true, known_approximation: approx },
       };
     }
 
@@ -3079,7 +3169,7 @@ export async function computeExtractAtomsBacklogCheck(
     return {
       name, status: 'ok',
       message: `${backlog} page(s) eligible (below warn threshold; pack does not run extract_atoms)`,
-      details: { backlog, pack_declares_phase: false, known_approximation: approx },
+      details: { backlog, backlog_by_source: sourceBreakdown, pack_declares_phase: false, known_approximation: approx },
     };
   } catch (err) {
     return { name, status: 'warn', message: `extract_atoms_backlog check failed: ${(err as Error).message}` };
@@ -3194,9 +3284,25 @@ export async function computeExtractHealthCheck(
     // High halt rates: per F-OUT-19 doctor surfaces extractor health
     // distinctly from rollup write health.
     const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10);
+    let atomsBacklog: number | undefined;
+    let actionableHighHaltKinds = highHaltKinds;
+    if (highHaltKinds.some(k => k.kind === 'atoms')) {
+      try {
+        const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
+        const backlog = await countExtractAtomsBacklog(engine);
+        if (typeof backlog === 'number') {
+          atomsBacklog = backlog;
+          if (backlog === 0) {
+            actionableHighHaltKinds = highHaltKinds.filter(k => k.kind !== 'atoms');
+          }
+        }
+      } catch {
+        // If the current-state probe fails, keep the existing halt-rate warning.
+      }
+    }
 
-    if (highHaltKinds.length > 0) {
-      const top3 = [...highHaltKinds]
+    if (actionableHighHaltKinds.length > 0) {
+      const top3 = [...actionableHighHaltKinds]
         .sort((a, b) => b.halt_rate - a.halt_rate)
         .slice(0, 3)
         .map(k => `${k.kind}=${(k.halt_rate * 100).toFixed(1)}%`)
@@ -3209,6 +3315,7 @@ export async function computeExtractHealthCheck(
           schema_version: 1,
           kinds,
           rollup_write_failures_7d: totalRollupFailures,
+          ...(atomsBacklog !== undefined ? { atoms_backlog: atomsBacklog } : {}),
         },
       };
     }
@@ -3222,6 +3329,26 @@ export async function computeExtractHealthCheck(
           schema_version: 1,
           kinds,
           rollup_write_failures_7d: totalRollupFailures,
+          ...(atomsBacklog !== undefined ? { atoms_backlog: atomsBacklog } : {}),
+        },
+      };
+    }
+
+    if (highHaltKinds.length > 0) {
+      const top3 = [...highHaltKinds]
+        .sort((a, b) => b.halt_rate - a.halt_rate)
+        .slice(0, 3)
+        .map(k => `${k.kind}=${(k.halt_rate * 100).toFixed(1)}%`)
+        .join(', ');
+      return {
+        name,
+        status: 'ok',
+        message: `historical atoms halt rate > 10% but current atom backlog is drained (top: ${top3})`,
+        details: {
+          schema_version: 1,
+          kinds,
+          rollup_write_failures_7d: totalRollupFailures,
+          ...(atomsBacklog !== undefined ? { atoms_backlog: atomsBacklog } : {}),
         },
       };
     }
@@ -4108,20 +4235,14 @@ export async function buildChecks(
   // half-upgraded brains and no signal.
   try {
     const home = process.env.HOME || '';
-    const errPath = join(home, '.gbrain', 'upgrade-errors.jsonl');
-    if (existsSync(errPath)) {
-      const lines = readFileSync(errPath, 'utf-8').split('\n').filter(l => l.trim());
-      if (lines.length > 0) {
-        const latest = JSON.parse(lines[lines.length - 1]) as {
-          ts: string; phase: string; from_version: string; to_version: string; hint: string;
-        };
-        const date = latest.ts.slice(0, 10);
-        checks.push({
-          name: 'upgrade_errors',
-          status: 'warn',
-          message: `Post-upgrade failure on ${date} (${latest.from_version} → ${latest.to_version}, phase: ${latest.phase}). Recovery: ${latest.hint}`,
-        });
-      }
+    const latest = readLatestActionableUpgradeError(home);
+    if (latest) {
+      const date = latest.ts.slice(0, 10);
+      checks.push({
+        name: 'upgrade_errors',
+        status: 'warn',
+        message: `Post-upgrade failure on ${date} (${latest.from_version} → ${latest.to_version}, phase: ${latest.phase}). Recovery: ${latest.hint}`,
+      });
     }
   } catch {
     // Read/parse failure is itself best-effort; skip silently.
@@ -4135,7 +4256,10 @@ export async function buildChecks(
   // Does NOT run the supervisor itself — this is a read-only health check.
   try {
     const { DEFAULT_PID_FILE } = await import('../core/minions/supervisor.ts');
-    const { readSupervisorEvents, summarizeCrashes } = await import('../core/minions/handlers/supervisor-audit.ts');
+    const {
+      readSupervisorEvents,
+      summarizeCurrentSupervisorGeneration,
+    } = await import('../core/minions/handlers/supervisor-audit.ts');
     const { readSupervisorPid } = await import('../core/minions/supervisor-pid.ts');
 
     const pidStatus = readSupervisorPid(DEFAULT_PID_FILE);
@@ -4143,7 +4267,8 @@ export async function buildChecks(
     const running = pidStatus.running;
 
     const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
-    const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
+    const generation = summarizeCurrentSupervisorGeneration(events);
+    const lastStart = generation.last_start;
     // Shared classifier — same code path runs in `gbrain jobs supervisor
     // status` (src/commands/jobs.ts). Counts only events whose `likely_cause`
     // is NOT in the clean denylist (clean_exit, graceful_shutdown). Pre-v0.34
@@ -4155,10 +4280,14 @@ export async function buildChecks(
     // (runtime) without grep'ing JSONL. `classifyWorkerExit` is still
     // used by the supervisor's internal restart policy where the binary
     // shape is the right contract.
-    const summary = summarizeCrashes(events);
-    const crashes24h = summary.total;
+    // Current health is scoped to the latest supervisor generation so a
+    // repaired/restarted supervisor doesn't stay yellow for stale crashes from
+    // an older binary. The full 24h history is still surfaced in details.
+    const summary = generation.current;
+    const history = generation.history;
+    const crashesSinceLastStart = summary.total;
     const causeStr = `runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} rss=${summary.by_cause.rss_watchdog} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy}${summary.by_cause.rss_watchdog > 0 ? ' (see worker_oom_loop)' : ''}`;
-    const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
+    const maxCrashesEvent = generation.events_since_last_start.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
 
     // Only surface a Check if the supervisor was ever observed (stops the
     // "never used the supervisor" install from getting a warn about it).
@@ -4175,20 +4304,22 @@ export async function buildChecks(
           status: 'warn',
           message: `Supervisor not running (last_start=${lastStart ?? 'unknown'}). Restart with: gbrain jobs supervisor start --detach`,
         });
-      } else if (crashes24h >= 1) {
+      } else if (crashesSinceLastStart >= 1) {
         // Threshold dropped from `>3` (pre-fix, inflated by clean exits being
         // miscounted) to `>=1` (any real crash is signal). Per-cause breakdown
         // gives operators triage context without grep'ing the JSONL.
         checks.push({
           name: 'supervisor',
           status: 'warn',
-          message: `Worker crashed ${crashes24h}x in last 24h (${causeStr}). Check ~/.gbrain/audit/supervisor-*.jsonl for context.`,
+          message: `Worker crashed ${crashesSinceLastStart}x since last supervisor start (${causeStr}; historical_crashes_24h=${history.total}). Check ~/.gbrain/audit/supervisor-*.jsonl for context.`,
+          details: { crashes_since_last_start: crashesSinceLastStart, historical_crashes_24h: history.total },
         });
       } else {
         checks.push({
           name: 'supervisor',
           status: 'ok',
-          message: `running=true pid=${supervisorPid} last_start=${lastStart ?? 'unknown'} crashes_24h=${crashes24h} clean_exits_24h=${summary.clean_exits}`,
+          message: `running=true pid=${supervisorPid} last_start=${lastStart ?? 'unknown'} crashes_since_last_start=${crashesSinceLastStart} historical_crashes_24h=${history.total} clean_exits_since_last_start=${summary.clean_exits} clean_exits_24h=${history.clean_exits}`,
+          details: { crashes_since_last_start: crashesSinceLastStart, historical_crashes_24h: history.total },
         });
       }
     }
@@ -4682,9 +4813,15 @@ export async function buildChecks(
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
+      const driftLimit = process.env.GBRAIN_DRIFT_LIMIT ? Number.parseInt(process.env.GBRAIN_DRIFT_LIMIT, 10) : NaN;
+      const driftTimeoutMs = process.env.GBRAIN_DRIFT_TIMEOUT_MS ? Number.parseInt(process.env.GBRAIN_DRIFT_TIMEOUT_MS, 10) : NaN;
       const result = await findMisroutedPages(
         engine!,
         nonDefaultWithPath.map(s => ({ id: s.id, local_path: s.local_path as string })),
+        {
+          limit: Number.isFinite(driftLimit) && driftLimit > 0 ? driftLimit : undefined,
+          timeoutMs: Number.isFinite(driftTimeoutMs) && driftTimeoutMs > 0 ? driftTimeoutMs : undefined,
+        },
       );
       if (result.walk_truncated) {
         checks.push({
@@ -5400,11 +5537,14 @@ export async function buildChecks(
   // notes brains). The coverage formula divides by entity-page count, so it's
   // structurally undefined when no entities exist — emitting WARN under that
   // condition is a false positive. Closes #530.
+  // Also skip when the brain has <100 entity pages. This mirrors orphan_ratio:
+  // low-cardinality entity coverage swings wildly and is not actionable as a
+  // brain-wide readiness penalty.
   progress.heartbeat('graph_coverage');
   try {
     const health = await engine.getHealth();
     const entityCount = (await engine.executeRaw<{ count: number }>(
-      "SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization')",
+      "SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization') AND deleted_at IS NULL",
     ))[0]?.count ?? 0;
 
     const linkPct = ((health.link_coverage ?? 0) * 100).toFixed(0);
@@ -5416,6 +5556,12 @@ export async function buildChecks(
         name: 'graph_coverage',
         status: 'ok',
         message: 'No entity pages — graph_coverage not applicable (markdown-only brain)',
+      });
+    } else if (entityCount < 100) {
+      checks.push({
+        name: 'graph_coverage',
+        status: 'ok',
+        message: `Vacuous: ${entityCount} entity pages (<100). Graph coverage not meaningful at this scale.`,
       });
     } else if ((health.link_coverage ?? 0) >= 0.5 && (health.timeline_coverage ?? 0) >= 0.5) {
       checks.push({ name: 'graph_coverage', status: 'ok', message: `Entity link coverage ${linkPct}%, timeline ${timelinePct}%` });
@@ -5959,12 +6105,31 @@ export async function buildChecks(
         .slice(0, 3)
         .map(([s, n]) => `${s}=${n}`)
         .join(', ');
-      const status: 'ok' | 'warn' | 'fail' =
-        events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+      let currentActionableIssues: number | undefined;
+      try {
+        const { loadConfig: _loadCfg } = await import('../core/config.ts');
+        const _cfg = _loadCfg();
+        const bytesBlock = _cfg?.content_sanity?.bytes_block ?? 500_000;
+        const rows = await engine.executeRaw<{ n: string | number }>(
+          `SELECT COUNT(*)::int AS n
+             FROM pages p
+            WHERE p.deleted_at IS NULL
+              AND (
+                p.frontmatter ? 'quarantine'
+                OR p.frontmatter ? 'content_flag'
+                OR (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > $1
+              )`,
+          [bytesBlock],
+        );
+        currentActionableIssues = Number(rows[0]?.n ?? 0);
+      } catch {
+        currentActionableIssues = undefined;
+      }
+      const status = classifyContentSanityAuditStatus(summary, events.length, currentActionableIssues);
       checks.push({
         name: 'content_sanity_audit_recent',
         status,
-        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${currentActionableIssues !== undefined ? `, current_actionable=${currentActionableIssues}` : ''}${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {

@@ -45,10 +45,10 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-async function seedPage(slug: string): Promise<void> {
+async function seedPage(slug: string, sourceId = 'default'): Promise<void> {
   await importFromContent(engine, slug, `---\ntitle: T\ntype: note\n---\n\n# Body ${slug}\n`, {
     noEmbed: true,
-    sourceId: 'default',
+    sourceId,
     sourcePath: `${slug}.md`,
   });
 }
@@ -102,6 +102,40 @@ describe('writePageThrough', () => {
     await seedPage(slug);
     const res = await writePageThrough(engine, slug);
     expect(res).toEqual({ written: false, skipped: 'no_repo_configured' });
+  });
+
+  test('non-default source with no local_path is DB-only and does not borrow sync.repo_path', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name, local_path) VALUES ('governed', 'governed', NULL)",
+    );
+    const slug = 'active-task-memory/session';
+    await seedPage(slug, 'governed');
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'governed' });
+
+    expect(res).toEqual({ written: false, skipped: 'source_db_only' });
+    expect(fs.existsSync(path.join(brainDir, '.sources/governed/active-task-memory/session.md'))).toBe(false);
+  });
+
+  test('non-default source with local_path writes to that source root', async () => {
+    const sourceDir = path.join(tmpRoot, 'source-repo');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    await engine.setConfig('sync.repo_path', brainDir);
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name, local_path) VALUES ('team-x', 'team-x', $1)",
+      [sourceDir],
+    );
+    const slug = 'shared/page';
+    await seedPage(slug, 'team-x');
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'team-x' });
+
+    const expectedPath = path.join(sourceDir, 'shared/page.md');
+    expect(res.written).toBe(true);
+    expect(res.path).toBe(expectedPath);
+    expect(fs.existsSync(expectedPath)).toBe(true);
+    expect(fs.existsSync(path.join(brainDir, '.sources/team-x/shared/page.md'))).toBe(false);
   });
 
   test('sync.repo_path is a file, not a directory → skipped repo_not_found', async () => {

@@ -13,7 +13,7 @@
  *   - dual cycle rows surface (full < targeted in timestamp)
  *   - cycle totals come from `result.report.totals`, NOT `result.totals`
  *     (codex MINOR-3)
- *   - JSON envelope shape (schema_version: 1)
+ *   - JSON envelope shape (schema_version: 1 + readiness contract)
  *   - active lock surfaces
  *   - live queue counts (NO time-window filter — codex MAJOR-6)
  */
@@ -63,7 +63,7 @@ async function seedSource(engine: PGLiteEngine, id: string) {
 }
 
 describe('gbrain status E2E (PGLite)', () => {
-  test('JSON envelope shape includes schema_version + sync + cycle + locks + workers + queue + autopilot', async () => {
+  test('JSON envelope shape includes schema_version + readiness + sync + cycle + locks + workers + queue + autopilot', async () => {
     await seedSource(engine, 'default');
     let jsonOut = '';
     const r = await runStatus(engine, ['--json'], {
@@ -76,6 +76,12 @@ describe('gbrain status E2E (PGLite)', () => {
     const parsed = JSON.parse(jsonOut.trim());
     expect(parsed.schema_version).toBe(1);
     expect(parsed.mode).toBe('local');
+    expect(parsed.readiness).toBeDefined();
+    expect(parsed.readiness.schema_version).toBe(1);
+    expect(['full', 'degraded']).toContain(parsed.readiness.mode);
+    expect(Array.isArray(parsed.readiness.degraded_reasons)).toBe(true);
+    expect(Array.isArray(parsed.readiness.sources)).toBe(true);
+    expect(parsed.readiness.queue_state).not.toBeNull();
     expect(parsed).toHaveProperty('sync');
     expect(parsed).toHaveProperty('cycle');
     expect(parsed).toHaveProperty('locks');

@@ -13,10 +13,15 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { runPhaseExtractAtoms, parseAtomsResponse } from '../../src/core/cycle/extract-atoms.ts';
+import { countExtractAtomsBacklog, runPhaseExtractAtoms, parseAtomsResponse } from '../../src/core/cycle/extract-atoms.ts';
 import { runPhaseSynthesizeConcepts } from '../../src/core/cycle/synthesize-concepts.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
-import type { ChatResult, ChatOpts } from '../../src/core/ai/gateway.ts';
+import {
+  configureGateway,
+  resetGateway,
+  type ChatResult,
+  type ChatOpts,
+} from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -32,6 +37,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  resetGateway();
 });
 
 function stubChat(text: string, opts: { input_tokens?: number; output_tokens?: number } = {}): (o: ChatOpts) => Promise<ChatResult> {
@@ -175,6 +181,96 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
     expect(result.status).toBe('warn');
     expect(result.details?.atoms_extracted).toBe(1);
     expect((result.details?.failures as unknown[]).length).toBe(1);
+  });
+
+  test('preflights chat provider before per-page extraction', async () => {
+    configureGateway({ chat_model: 'anthropic:claude-sonnet-4-6', env: {} });
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _pages: [{ slug: 'source/page', content: 'x'.repeat(600), contentHash: 'hash-page' }],
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.summary).toContain('chat provider unavailable');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.pages_total).toBe(1);
+    expect(result.details?.failures).toEqual([
+      {
+        source: 'gateway.chat',
+        error: 'anthropic:claude-sonnet-4-6 chat requires ANTHROPIC_API_KEY.',
+      },
+    ]);
+  });
+
+  test('marks page content hash handled when chat returns no parseable atoms', async () => {
+    const content = 'This is a source page with enough content to be eligible. '.repeat(20);
+    await engine.putPage('sources/no-atoms', {
+      title: 'No atoms',
+      type: 'source',
+      compiled_truth: content,
+      frontmatter: { type: 'source' },
+      timeline: '',
+    });
+
+    expect(await countExtractAtomsBacklog(engine, 'default')).toBe(1);
+
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _chat: stubChat('not json'),
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.pages_processed).toBe(1);
+    expect(await countExtractAtomsBacklog(engine, 'default')).toBe(0);
+
+    const rows = await engine.executeRaw<{ empty_hash: string | null }>(
+      `SELECT frontmatter->>'extract_atoms_empty_hash' AS empty_hash
+         FROM pages
+        WHERE slug = 'sources/no-atoms' AND source_id = 'default'`,
+    );
+    expect(rows[0].empty_hash).toBeTruthy();
+  });
+
+  test('empty-atom marker normalizes array-shaped frontmatter before merging', async () => {
+    const content = 'This is a source page with enough content to be eligible. '.repeat(20);
+    await engine.putPage('sources/array-frontmatter', {
+      title: 'Array frontmatter',
+      type: 'source',
+      compiled_truth: content,
+      frontmatter: { type: 'source', keep: 'yes' },
+      timeline: '',
+    });
+    await engine.executeRaw(
+      `UPDATE pages
+          SET frontmatter = '[{"type":"source","keep":"yes"}]'::jsonb
+        WHERE slug = 'sources/array-frontmatter' AND source_id = 'default'`,
+    );
+
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _chat: stubChat('not json'),
+    });
+
+    expect(result.details?.pages_processed).toBe(1);
+    expect(await countExtractAtomsBacklog(engine, 'default')).toBe(0);
+    const rows = await engine.executeRaw<{ type: string | null; keep: string | null; empty_hash: string | null; shape: string }>(
+      `SELECT frontmatter->>'type' AS type,
+              frontmatter->>'keep' AS keep,
+              frontmatter->>'extract_atoms_empty_hash' AS empty_hash,
+              jsonb_typeof(frontmatter) AS shape
+         FROM pages
+        WHERE slug = 'sources/array-frontmatter' AND source_id = 'default'`,
+    );
+    expect(rows[0]).toMatchObject({
+      type: 'source',
+      keep: 'yes',
+      shape: 'object',
+    });
+    expect(rows[0].empty_hash).toBeTruthy();
   });
 
   // v0.41.2.1 regression case (D9 #14 wording): with _pages:[] and same

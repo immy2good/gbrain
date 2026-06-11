@@ -20,7 +20,10 @@ import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
-import { countExtractAtomsBacklog } from '../src/core/cycle/extract-atoms.ts';
+import {
+  countExtractAtomsBacklog,
+  countExtractAtomsBacklogBySource,
+} from '../src/core/cycle/extract-atoms.ts';
 import { computeExtractAtomsBacklogCheck } from '../src/commands/doctor.ts';
 
 let engine: PGLiteEngine;
@@ -42,8 +45,16 @@ beforeEach(async () => {
 
 const BODY = 'x'.repeat(600); // >= MIN_PAGE_CHARS_FOR_EXTRACTION (500)
 
-async function seedArticle(slug: string) {
-  return engine.putPage(slug, { type: 'article', title: slug, compiled_truth: BODY });
+async function seedArticle(slug: string, sourceId = 'default') {
+  if (sourceId !== 'default') {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path)
+       VALUES ($1, $1, NULL)
+       ON CONFLICT (id) DO NOTHING`,
+      [sourceId],
+    );
+  }
+  return engine.putPage(slug, { type: 'article', title: slug, compiled_truth: BODY }, { sourceId });
 }
 
 describe('countExtractAtomsBacklog (issue #1678)', () => {
@@ -53,6 +64,17 @@ describe('countExtractAtomsBacklog (issue #1678)', () => {
     await seedArticle('article-c');
     expect(await countExtractAtomsBacklog(engine)).toBe(3);
     expect(await countExtractAtomsBacklog(engine, 'default')).toBe(3);
+  });
+
+  it('groups eligible pages by source for brain-wide drains', async () => {
+    await seedArticle('article-default');
+    await seedArticle('article-alpha-1', 'alpha');
+    await seedArticle('article-alpha-2', 'alpha');
+
+    expect(await countExtractAtomsBacklogBySource(engine)).toEqual([
+      { source_id: 'alpha', count: 2 },
+      { source_id: 'default', count: 1 },
+    ]);
   });
 
   it('excludes a page that already has a matching atom (NOT EXISTS)', async () => {
@@ -92,6 +114,8 @@ describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
       computeExtractAtomsBacklogCheck(engine));
     expect(check.status).toBe('warn');
     expect(check.message).toContain('--drain');
+    expect(check.message).toContain('--all-sources');
+    expect((check.details as { fix_hint: string }).fix_hint).toContain('--all-sources');
     expect((check.details as { pack_declares_phase: boolean }).pack_declares_phase).toBe(false);
     expect((check.details as { known_approximation: string }).known_approximation).toContain('page backlog only');
   });

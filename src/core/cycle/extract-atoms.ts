@@ -48,7 +48,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { chat as gatewayChat, diagnoseChat, type ChatDiagnosis } from '../ai/gateway.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 
@@ -140,6 +140,24 @@ atom_type MUST be one of: ${ATOM_TYPES.join(', ')}.
 
 Output ONLY the JSON array, no prose.`;
 
+function formatChatDiagnosis(diagnosis: ChatDiagnosis): string {
+  if (diagnosis.ok) return 'chat provider is available';
+  switch (diagnosis.reason) {
+    case 'no_gateway_config':
+      return 'AI gateway is not configured. Call configureGateway() during engine connect.';
+    case 'no_model_configured':
+      return 'No chat model configured. Set chat_model to a chat-capable provider:model.';
+    case 'unknown_provider':
+      return `Unknown chat provider for ${diagnosis.model}: ${diagnosis.message}`;
+    case 'no_touchpoint':
+      return `${diagnosis.model} does not support chat. Set chat_model to a chat-capable provider:model.`;
+    case 'user_provided_model_unset':
+      return `${diagnosis.recipeId} chat requires an explicit provider:model. Set chat_model accordingly.`;
+    case 'missing_env':
+      return `${diagnosis.model} chat requires ${diagnosis.missingEnvVars.join(', ')}.`;
+  }
+}
+
 interface DiscoveredPage {
   slug: string;
   content: string;
@@ -180,6 +198,7 @@ export async function discoverExtractablePages(
       AND p.content_hash IS NOT NULL
       AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
       AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+      AND COALESCE(p.frontmatter->>'extract_atoms_empty_hash', '') <> substring(p.content_hash from 1 for 16)
       AND length(COALESCE(p.compiled_truth, '')) >= $3
       ${hasFilter ? "AND p.slug = ANY($5::text[])" : ''}
       AND NOT EXISTS (
@@ -252,6 +271,7 @@ export async function countExtractAtomsBacklog(
            AND p.content_hash IS NOT NULL
            AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
            AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+           AND COALESCE(p.frontmatter->>'extract_atoms_empty_hash', '') <> substring(p.content_hash from 1 for 16)
            AND length(COALESCE(p.compiled_truth, '')) >= $3
            AND NOT EXISTS (
              SELECT 1 FROM pages atom
@@ -265,6 +285,7 @@ export async function countExtractAtomsBacklog(
            AND p.content_hash IS NOT NULL
            AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
            AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+           AND COALESCE(p.frontmatter->>'extract_atoms_empty_hash', '') <> substring(p.content_hash from 1 for 16)
            AND length(COALESCE(p.compiled_truth, '')) >= $2
            AND NOT EXISTS (
              SELECT 1 FROM pages atom
@@ -280,6 +301,52 @@ export async function countExtractAtomsBacklog(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[extract_atoms] backlog count failed: ${msg}`);
+    return null;
+  }
+}
+
+export interface ExtractAtomsBacklogSourceCount {
+  source_id: string;
+  count: number;
+}
+
+/**
+ * Brain-wide backlog grouped by source. Shares the same eligibility predicate
+ * as countExtractAtomsBacklog(), but preserves source_id so remediation can
+ * drain the actual sources instead of accidentally checking only `default`.
+ */
+export async function countExtractAtomsBacklogBySource(
+  engine: BrainEngine,
+): Promise<ExtractAtomsBacklogSourceCount[] | null> {
+  try {
+    const rows = await engine.executeRaw<{ source_id: string; cnt: string | number }>(
+      `SELECT COALESCE(p.source_id, 'default') AS source_id,
+              COUNT(*) AS cnt
+         FROM pages p
+        WHERE p.type = ANY($1::text[])
+          AND p.deleted_at IS NULL
+          AND p.content_hash IS NOT NULL
+          AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
+          AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+          AND COALESCE(p.frontmatter->>'extract_atoms_empty_hash', '') <> substring(p.content_hash from 1 for 16)
+          AND length(COALESCE(p.compiled_truth, '')) >= $2
+          AND NOT EXISTS (
+            SELECT 1 FROM pages atom
+             WHERE atom.type = 'atom' AND atom.source_id = p.source_id
+               AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
+               AND atom.deleted_at IS NULL
+          )
+        GROUP BY COALESCE(p.source_id, 'default')
+        ORDER BY COALESCE(p.source_id, 'default')`,
+      [EXTRACTABLE_PAGE_TYPES as unknown as string[], MIN_PAGE_CHARS_FOR_EXTRACTION],
+    );
+    return rows.map((r) => ({
+      source_id: r.source_id,
+      count: Number(r.cnt ?? 0),
+    }));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[extract_atoms] backlog source count failed: ${msg}`);
     return null;
   }
 }
@@ -322,6 +389,35 @@ export async function atomsExistingForHashes(
     console.error(`[extract_atoms] batch idempotency check failed (assuming none extracted): ${msg}`);
     return new Set();
   }
+}
+
+async function markPageExtractAtomsEmpty(
+  engine: BrainEngine,
+  sourceId: string,
+  slug: string,
+  contentHash: string,
+): Promise<void> {
+  const hash16 = contentHash.slice(0, 16);
+  const markedAt = new Date().toISOString();
+  await engine.executeRaw(
+    `UPDATE pages
+        SET frontmatter = (
+              CASE
+                WHEN jsonb_typeof(frontmatter) = 'object' THEN frontmatter
+                WHEN jsonb_typeof(frontmatter) = 'array' AND jsonb_typeof(frontmatter->0) = 'object' THEN frontmatter->0
+                ELSE '{}'::jsonb
+              END
+            ) || jsonb_build_object(
+              'extract_atoms_empty_hash', $4::text,
+              'extract_atoms_empty_at', $5::text,
+              'extract_atoms_empty_by', 'extract_atoms-v0.41.2.1'
+            )
+      WHERE source_id = $1
+        AND slug = $2
+        AND content_hash = $3
+        AND deleted_at IS NULL`,
+    [sourceId, slug, contentHash, hash16, markedAt],
+  );
 }
 
 /**
@@ -446,6 +542,35 @@ export async function runPhaseExtractAtoms(
     };
   }
 
+  if (!opts._chat) {
+    const chatDiagnosis = diagnoseChat();
+    if (!chatDiagnosis.ok) {
+      const error = formatChatDiagnosis(chatDiagnosis);
+      return {
+        phase: 'extract_atoms',
+        status: 'warn',
+        duration_ms: 0,
+        summary: `extract_atoms: chat provider unavailable (${error})`,
+        details: {
+          atoms_extracted: 0,
+          transcripts_processed: 0,
+          transcripts_total: transcripts.length,
+          transcripts_skipped_budget: 0,
+          pages_processed: 0,
+          pages_total: pages.length,
+          pages_skipped_budget: 0,
+          duplicates_skipped: duplicatesSkipped,
+          failures: [{ source: 'gateway.chat', error }],
+          estimated_spend_usd: 0,
+          budget_usd: DEFAULT_BUDGET_USD,
+          source_id: sourceId,
+          dry_run: opts.dryRun ?? false,
+          chat_diagnosis: chatDiagnosis,
+        },
+      };
+    }
+  }
+
   // 4. Per work-item: extract atoms via Haiku
   let totalAtomsExtracted = 0;
   let transcriptsProcessed = 0;
@@ -510,6 +635,9 @@ export async function runPhaseExtractAtoms(
 
       const atoms = parseAtomsResponse(result.text);
       if (atoms.length === 0) {
+        if (!opts.dryRun && item.kind === 'page') {
+          await markPageExtractAtomsEmpty(engine, sourceId, item.slug, item.contentHash);
+        }
         if (item.kind === 'transcript') transcriptsProcessed++;
         else pagesProcessed++;
         continue;

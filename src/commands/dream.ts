@@ -76,6 +76,8 @@ interface DreamArgs {
   drain: boolean;
   /** Drain wallclock budget in seconds. Default 300 (5 min). */
   windowSeconds: number;
+  /** Drain every source with page backlog. Only valid with --drain. */
+  allSources: boolean;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -196,6 +198,7 @@ function parseArgs(args: string[]): DreamArgs {
   // this wave (it has a real eligibility predicate; synthesize_concepts does
   // not — Codex #12). --drain with no --phase defaults to extract_atoms.
   const drain = args.includes('--drain');
+  const allSources = args.includes('--all-sources');
   const windowIdx = args.indexOf('--window');
   let windowSeconds = DEFAULT_DRAIN_WINDOW_SECONDS;
   if (windowIdx !== -1) {
@@ -212,6 +215,13 @@ function parseArgs(args: string[]): DreamArgs {
       console.error(`--drain currently supports only --phase extract_atoms (got "${phase}")`);
       process.exit(2);
     }
+  } else if (allSources) {
+    console.error('--all-sources is only valid with --drain');
+    process.exit(2);
+  }
+  if (allSources && source !== null) {
+    console.error('--all-sources cannot be combined with --source/--source-id');
+    process.exit(2);
   }
 
   return {
@@ -229,6 +239,7 @@ function parseArgs(args: string[]): DreamArgs {
     source,
     drain,
     windowSeconds,
+    allSources,
   };
 }
 
@@ -340,6 +351,8 @@ Options:
                       grind down an extract_atoms backlog on a brain whose
                       pack doesn't run the phase in the routine cycle.
   --window <seconds>  Drain wallclock budget. Default 300 (5 min).
+  --all-sources       With --drain, drain every source with page backlog.
+                      Cannot be combined with --source/--source-id.
 
   --unsafe-bypass-dream-guard
                       Disable the self-consumption guard. Use only when you
@@ -452,10 +465,123 @@ async function runDrain(
   brainDir: string | null,
 ): Promise<void> {
   const { LockUnavailableError } = await import('../core/db-lock.ts');
-  const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
+  const {
+    countExtractAtomsBacklog,
+    countExtractAtomsBacklogBySource,
+  } = await import('../core/cycle/extract-atoms.ts');
   const { runExtractAtomsDrainForSource } = await import('../core/cycle/extract-atoms-drain.ts');
 
   const extractionSourceId = resolvedSourceId ?? 'default';
+
+  if (opts.allSources) {
+    const counts = await countExtractAtomsBacklogBySource(engine);
+    if (counts === null) {
+      if (opts.json) {
+        console.log(JSON.stringify({ phase: 'extract_atoms', status: 'warn', reason: 'backlog_count_failed', remaining: null }, null, 2));
+      } else {
+        console.log('[drain] could not count per-source extract_atoms backlog');
+      }
+      process.exit(EXIT_DRAIN_INCOMPLETE);
+    }
+
+    if (opts.dryRun) {
+      const remaining = counts.reduce((sum, row) => sum + row.count, 0);
+      if (opts.json) {
+        console.log(JSON.stringify({
+          phase: 'extract_atoms',
+          status: 'ok',
+          dry_run: true,
+          extracted: 0,
+          skipped: 0,
+          remaining,
+          sources: counts,
+          batches: 0,
+          stopped: remaining === 0 ? 'drained' : 'window',
+        }, null, 2));
+      } else {
+        const summary = counts
+          .filter((row) => row.count > 0)
+          .map((row) => `${row.source_id}=${row.count}`)
+          .join(', ');
+        console.log(`[drain] dry-run: ${remaining} page(s) eligible across sources${summary ? ` (${summary})` : ''}`);
+      }
+      if (remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
+      return;
+    }
+
+    const targets = counts.filter((row) => row.count > 0).map((row) => row.source_id);
+    const sourceResults: Array<{
+      source_id: string;
+      phase: 'extract_atoms';
+      status: 'ok' | 'skipped';
+      extracted: number;
+      skipped: number;
+      remaining: number | null;
+      batches: number;
+      failures: Array<{ source: string; error: string }>;
+      stopped?: string;
+      reason?: string;
+    }> = [];
+    for (const sourceId of targets) {
+      try {
+        const result = await runExtractAtomsDrainForSource(engine, {
+          sourceId: sourceId === 'default' ? undefined : sourceId,
+          windowSeconds: opts.windowSeconds,
+          // Brain-wide doctor backlog is page-only. Avoid pointing transcript
+          // discovery at one checkout while draining another source.
+          brainDir: undefined,
+          onBatch: opts.json ? undefined : ({ batch, extracted, remaining }) => {
+            process.stderr.write(`[drain:${sourceId}] batch ${batch}: +${extracted} atom(s), ~${remaining ?? '?'} remaining\n`);
+          },
+        });
+        sourceResults.push({ source_id: sourceId, ...result });
+      } catch (e) {
+        if (e instanceof LockUnavailableError) {
+          sourceResults.push({
+            source_id: sourceId,
+            phase: 'extract_atoms',
+            status: 'skipped',
+            extracted: 0,
+            skipped: 0,
+            reason: 'cycle_already_running',
+            remaining: counts.find((row) => row.source_id === sourceId)?.count ?? null,
+            batches: 0,
+            failures: [],
+          });
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    const remaining = sourceResults.some((r) => r.remaining === null)
+      ? null
+      : sourceResults.reduce((sum, r) => sum + Number(r.remaining ?? 0), 0);
+    const extracted = sourceResults.reduce((sum, r) => sum + Number(r.extracted ?? 0), 0);
+    const skipped = sourceResults.reduce((sum, r) => sum + Number(r.skipped ?? 0), 0);
+    const batches = sourceResults.reduce((sum, r) => sum + Number(r.batches ?? 0), 0);
+    const failures = sourceResults.flatMap((r) =>
+      r.failures.map((f) => ({ source_id: r.source_id, ...f })));
+    const payload = {
+      phase: 'extract_atoms',
+      status: 'ok',
+      all_sources: true,
+      extracted,
+      skipped,
+      remaining,
+      batches,
+      failures,
+      sources: sourceResults,
+      stopped: remaining === 0 ? 'drained' : 'incomplete',
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(`[drain] extracted ${extracted} atom(s) across ${sourceResults.length} source(s) and ${batches} batch(es); ${remaining ?? '?'} remaining`);
+    }
+    if (remaining === null || remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
+    return;
+  }
 
   // Dry-run: preview the backlog without holding the lock or extracting.
   if (opts.dryRun) {

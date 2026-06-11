@@ -80,6 +80,14 @@ describe('formatRecipeTable', () => {
     expect(zeLine).toContain('—');
   });
 
+  test('dynamic local Ollama recipe shows chat support without required env', () => {
+    const out = formatRecipeTable(listRecipes(), {});
+    const ollamaLine = out.split('\n').find(line => line.startsWith('ollama'));
+    expect(ollamaLine).toBeDefined();
+    expect(ollamaLine).toContain('yes');
+    expect(ollamaLine).toContain('✓ ready');
+  });
+
   test('isolated subset renders correctly (picker reuses this)', () => {
     const openai = getRecipe('openai');
     const ze = getRecipe('zeroentropyai');

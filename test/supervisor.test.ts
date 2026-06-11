@@ -4,7 +4,7 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { readSupervisorEvents, computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
-import { calculateBackoffMs } from '../src/core/minions/supervisor.ts';
+import { calculateBackoffMs, resolveSupervisorPidFile } from '../src/core/minions/supervisor.ts';
 
 const TEST_PID_FILE = '/tmp/gbrain-supervisor-test.pid';
 
@@ -104,6 +104,38 @@ async function waitFor(pred: () => boolean, timeoutMs: number, tickMs = 20): Pro
 }
 
 describe('MinionSupervisor', () => {
+  describe('resolveSupervisorPidFile', () => {
+    it('uses explicit GBRAIN_SUPERVISOR_PID_FILE first', () => {
+      const pidFile = join(tmpdir(), 'explicit-gbrain-supervisor.pid');
+      const resolved = resolveSupervisorPidFile({
+        GBRAIN_SUPERVISOR_PID_FILE: pidFile,
+        GBRAIN_HOME: join(tmpdir(), 'ignored-gbrain-home'),
+      }, join(tmpdir(), 'ignored-home'));
+
+      expect(resolved).toBe(pidFile);
+    });
+
+    it('scopes the default PID file to GBRAIN_HOME', () => {
+      const home = join(tmpdir(), 'gbrain-supervisor-home');
+      const resolved = resolveSupervisorPidFile({
+        GBRAIN_SUPERVISOR_PID_FILE: undefined,
+        GBRAIN_HOME: home,
+      }, join(tmpdir(), 'ignored-home'));
+
+      expect(resolved).toBe(join(home, '.gbrain', 'supervisor.pid'));
+    });
+
+    it('falls back to the canonical OS home when GBRAIN_HOME is unset', () => {
+      const osHome = join(tmpdir(), 'gbrain-os-home');
+      const resolved = resolveSupervisorPidFile({
+        GBRAIN_SUPERVISOR_PID_FILE: undefined,
+        GBRAIN_HOME: undefined,
+      }, osHome);
+
+      expect(resolved).toBe(join(osHome, '.gbrain', 'supervisor.pid'));
+    });
+  });
+
   describe('calculateBackoffMs', () => {
     it('returns ~1s for first crash', () => {
       const backoff = calculateBackoffMs(0);

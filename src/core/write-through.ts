@@ -3,9 +3,9 @@
  *
  * After a page row lands in the DB (via importFromContent / putPage), this
  * renders the row to markdown via `serializePageToMarkdown` and writes it to
- * `sync.repo_path` so the brain repo has a committable `.md` artifact that
- * round-trips cleanly through `gbrain sync`. The file is rendered FROM the DB
- * row, so the two sinks cannot diverge.
+ * the owning source's checkout. Default-source legacy brains still fall back
+ * to `sync.repo_path`; non-default sources must have `sources.local_path`.
+ * The file is rendered FROM the DB row, so the two sinks cannot diverge.
  *
  * Extracted from the v0.38 `put_page` write-through (operations.ts) so the
  * `put_page` op AND `gbrain brainstorm/lsd --save` share one implementation
@@ -22,7 +22,7 @@
  */
 
 import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
@@ -39,10 +39,11 @@ export interface WriteThroughResult {
    * Non-error reasons the file was not written:
    *   - no_repo_configured: `sync.repo_path` is unset (DB-only by design).
    *   - repo_not_found: `sync.repo_path` set but missing / not a directory.
+   *   - source_db_only: non-default source has no `sources.local_path`.
    *   - page_not_found_after_write: the DB row isn't readable back (the caller's
    *     DB write failed or targeted a different source).
    */
-  skipped?: 'no_repo_configured' | 'repo_not_found' | 'page_not_found_after_write';
+  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_db_only' | 'page_not_found_after_write';
   /** Set when the render/write/rename itself threw (EACCES, ENOTDIR, disk full). */
   error?: string;
 }
@@ -52,6 +53,37 @@ export interface WritePageThroughOpts {
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
+}
+
+interface WriteThroughTarget {
+  root: string | null;
+  fileSourceId: string;
+  skipped?: WriteThroughResult['skipped'];
+}
+
+async function resolveWriteThroughTarget(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<WriteThroughTarget> {
+  const rows = await engine.executeRaw<{ local_path: string | null }>(
+    `SELECT local_path FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  const sourcePath = rows[0]?.local_path ?? null;
+
+  if (sourcePath) {
+    return { root: sourcePath, fileSourceId: 'default' };
+  }
+
+  if (sourceId !== 'default') {
+    return { root: null, fileSourceId: sourceId, skipped: 'source_db_only' };
+  }
+
+  const legacyPath = await engine.getConfig('sync.repo_path');
+  if (!legacyPath) {
+    return { root: null, fileSourceId: sourceId, skipped: 'no_repo_configured' };
+  }
+  return { root: legacyPath, fileSourceId: sourceId };
 }
 
 /**
@@ -67,11 +99,11 @@ export async function writePageThrough(
 ): Promise<WriteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
-    const repoPath = await engine.getConfig('sync.repo_path');
-    if (!repoPath) {
-      return { written: false, skipped: 'no_repo_configured' };
+    const target = await resolveWriteThroughTarget(engine, sourceId);
+    if (!target.root) {
+      return { written: false, skipped: target.skipped ?? 'no_repo_configured' };
     }
-    if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
+    if (!existsSync(target.root) || !statSync(target.root).isDirectory()) {
       return { written: false, skipped: 'repo_not_found' };
     }
 
@@ -85,7 +117,9 @@ export async function writePageThrough(
       frontmatterOverrides: opts.frontmatterOverrides,
     });
 
-    const filePath = resolvePageFilePath(repoPath, slug, sourceId);
+    const filePath = target.fileSourceId === 'default'
+      ? join(target.root, `${slug}.md`)
+      : resolvePageFilePath(target.root, slug, target.fileSourceId);
     mkdirSync(dirname(filePath), { recursive: true });
 
     // Atomic write: unique temp sibling + rename. Unique name (pid + random)

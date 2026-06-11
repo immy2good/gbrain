@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { buildSyncManifest, isSyncable, pathToSlug, pruneDir, isCodeFilePath } from '../src/core/sync.ts';
+import { collectSyncableFiles } from '../src/commands/import.ts';
 import { buildAutoEmbedArgs, buildGitInvocation, runSync } from '../src/commands/sync.ts';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
@@ -113,11 +114,20 @@ describe('isSyncable', () => {
     expect(isSyncable('node_modules/some-pkg/docs/api.md')).toBe(false);
     expect(isSyncable('apps/web/node_modules/dep/notes.md')).toBe(false);
   });
+
+  test('rejects vendor paths at any depth', () => {
+    expect(isSyncable('vendor/aws/aws-sdk-php/CHANGELOG.md')).toBe(false);
+    expect(isSyncable('apps/api/vendor/package/docs/notes.md')).toBe(false);
+  });
 });
 
 describe('pruneDir', () => {
   test('blocks node_modules (no leading dot, the latent-bug case)', () => {
     expect(pruneDir('node_modules')).toBe(false);
+  });
+
+  test('blocks vendor dependency directories', () => {
+    expect(pruneDir('vendor')).toBe(false);
   });
 
   test('blocks dot-prefix dirs (.git, .obsidian, .raw, .cache, etc.)', () => {
@@ -148,6 +158,26 @@ describe('pruneDir', () => {
 
   test('empty string returns true (defensive default)', () => {
     expect(pruneDir('')).toBe(true);
+  });
+});
+
+describe('collectSyncableFiles', () => {
+  test('does not descend into vendor dependency directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-sync-vendor-'));
+    try {
+      mkdirSync(join(root, 'vendor', 'aws'), { recursive: true });
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'vendor', 'aws', 'CHANGELOG.md'), '# vendor noise\n');
+      writeFileSync(join(root, 'docs', 'note.md'), '# real note\n');
+
+      const files = collectSyncableFiles(root, { strategy: 'markdown' })
+        .map((file) => file.replace(/\\/g, '/'));
+
+      expect(files.some((file) => file.includes('/vendor/'))).toBe(false);
+      expect(files.some((file) => file.endsWith('/docs/note.md'))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

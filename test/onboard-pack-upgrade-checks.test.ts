@@ -5,6 +5,9 @@
 // JOIN (F12); manual_only RemediationStep flag round-trips through render.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
@@ -15,6 +18,7 @@ import {
 import { toOnboardRecommendation } from '../src/core/onboard/render.ts';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
 import { _resetPackLocatorForTests } from '../src/core/schema-pack/load-active.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 
@@ -52,11 +56,16 @@ async function seedPages(types: string[]) {
   }
 }
 
+function emptyHome(): string {
+  return mkdtempSync(join(tmpdir(), 'gbrain-onboard-home-'));
+}
+
 describe('checkPackUpgradeAvailable', () => {
   it('fires on gbrain-base brain with gbrain-base-v2 available', async () => {
     // Default active pack is gbrain-base; gbrain-base-v2 declares
     // migration_from: {pack: gbrain-base, version: "1.x"}.
-    const result = await checkPackUpgradeAvailable(engine);
+    const result = await withEnv({ GBRAIN_HOME: emptyHome() }, () =>
+      checkPackUpgradeAvailable(engine));
     expect(result.check.name).toBe('pack_upgrade_available');
     expect(result.check.status).toBe('warn');
     expect(result.check.message).toContain('gbrain-base-v2');
@@ -67,17 +76,35 @@ describe('checkPackUpgradeAvailable', () => {
   });
 
   it('manual_only routing via render.ts allowlist (D17)', async () => {
-    const result = await checkPackUpgradeAvailable(engine);
+    const result = await withEnv({ GBRAIN_HOME: emptyHome() }, () =>
+      checkPackUpgradeAvailable(engine));
     const step = result.remediations[0];
     const rec = toOnboardRecommendation(step);
     expect(rec.apply_policy).toBe('manual_only');
+  });
+
+  it('does not warn when home config is already on gbrain-base-v2 and DB config is unset', async () => {
+    const home = emptyHome();
+    mkdirSync(join(home, '.gbrain'), { recursive: true });
+    writeFileSync(
+      join(home, '.gbrain', 'config.json'),
+      JSON.stringify({ engine: 'pglite', schema_pack: 'gbrain-base-v2' }),
+    );
+
+    const result = await withEnv({ GBRAIN_HOME: home }, () =>
+      checkPackUpgradeAvailable(engine));
+
+    expect(result.check.status).toBe('ok');
+    expect(result.check.message).toContain('gbrain-base-v2');
+    expect(result.remediations).toEqual([]);
   });
 });
 
 describe('checkTypeProliferation (D16 pack-aware ratio)', () => {
   it('returns ok when distinct types under declared+5 threshold', async () => {
     await seedPages(['note', 'meeting', 'slack']);
-    const result = await checkTypeProliferation(engine);
+    const result = await withEnv({ GBRAIN_HOME: emptyHome() }, () =>
+      checkTypeProliferation(engine));
     expect(result.check.status).toBe('ok');
   });
 
@@ -86,7 +113,8 @@ describe('checkTypeProliferation (D16 pack-aware ratio)', () => {
     const types: string[] = [];
     for (let i = 0; i < 32; i++) types.push(`custom-type-${i}`);
     await seedPages(types);
-    const result = await checkTypeProliferation(engine);
+    const result = await withEnv({ GBRAIN_HOME: emptyHome() }, () =>
+      checkTypeProliferation(engine));
     expect(result.check.status).toBe('warn');
     expect(result.check.message).toMatch(/32 distinct/);
   });

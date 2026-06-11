@@ -24,7 +24,7 @@
  *    the FS walk into one array, then run ONE SELECT against pages with a
  *    VALUES clause. NOT a per-file loop (which would be 20K round trips on
  *    a 10K-file source).
- *  - Time + size bounds: cap the walk at 10K files OR 5s. Bail with a "check
+ *  - Time + size bounds: cap the walk at 50K files OR 30s. Bail with a "check
  *    skipped, walk too large" status instead of letting doctor hang.
  *  - Wrapper try/catch around the walk per OV13: ENOENT/EACCES on local_path
  *    yields zero files, NOT a thrown crash that takes down the whole doctor
@@ -55,8 +55,8 @@ export interface MisroutedResult {
   sample: MisroutedSample[];
 }
 
-const DEFAULT_FILE_LIMIT = 10_000;
-const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_FILE_LIMIT = 50_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const SAMPLE_LIMIT = 5;
 
 /**

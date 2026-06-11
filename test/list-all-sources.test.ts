@@ -135,4 +135,35 @@ describe('engine.updateSourceConfig', () => {
     const all = await engine.listAllSources();
     expect(all.find(s => s.id === 'delta')!.config.last_full_cycle_at).toBe('2026-05-22T11:00:00.000Z');
   });
+
+  test('repairs legacy array-shaped config before merging patch', async () => {
+    await seedSource('legacy-array');
+    await engine.executeRaw(
+      `UPDATE sources SET config = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(['{}', { old: true }]), 'legacy-array'],
+    );
+    const updated = await engine.updateSourceConfig('legacy-array', { last_full_cycle_at: '2026-05-22T12:00:00.000Z' });
+    expect(updated).toBe(true);
+    const rows = await engine.executeRaw<{ typeof: string; value: string | null }>(
+      `SELECT jsonb_typeof(config) AS typeof, config->>'last_full_cycle_at' AS value FROM sources WHERE id = $1`,
+      ['legacy-array'],
+    );
+    expect(rows[0]?.typeof).toBe('object');
+    expect(rows[0]?.value).toBe('2026-05-22T12:00:00.000Z');
+  });
+
+  test('repairs legacy string-shaped config before merging patch', async () => {
+    await seedSource('legacy-string');
+    await engine.executeRaw(
+      `UPDATE sources SET config = $1::jsonb WHERE id = $2`,
+      [JSON.stringify('{}'), 'legacy-string'],
+    );
+    await engine.updateSourceConfig('legacy-string', { last_full_cycle_at: '2026-05-22T13:00:00.000Z' });
+    const rows = await engine.executeRaw<{ typeof: string; value: string | null }>(
+      `SELECT jsonb_typeof(config) AS typeof, config->>'last_full_cycle_at' AS value FROM sources WHERE id = $1`,
+      ['legacy-string'],
+    );
+    expect(rows[0]?.typeof).toBe('object');
+    expect(rows[0]?.value).toBe('2026-05-22T13:00:00.000Z');
+  });
 });
