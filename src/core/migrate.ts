@@ -4733,6 +4733,459 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 104,
+    name: 'pages_atom_source_hash_idx',
+    // Partial expression index on frontmatter->>'source_hash' for atom
+    // rows. Powers `atomsExistingForHashes` in extract_atoms
+    // (src/core/cycle/extract-atoms.ts), which replaces the prior
+    // per-hash loop that did 7K SQL round trips per cycle on a brain
+    // with ~7K conversation transcripts.
+    //
+    // Mirrors v97 pattern: Postgres uses CREATE INDEX CONCURRENTLY
+    // (no SHARE-lock blocking concurrent writes) and pre-drops any
+    // invalid remnant from a prior failed CONCURRENTLY attempt via
+    // pg_index.indisvalid. PGLite uses plain CREATE INDEX.
+    transaction: false,
+    sql: '',
+    handler: async (engine) => {
+      if (engine.kind === 'postgres') {
+        await engine.runMigration(
+          104,
+          `DO $$ BEGIN
+             IF EXISTS (
+               SELECT 1 FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE c.relname = 'pages_atom_source_hash_idx' AND NOT i.indisvalid
+             ) THEN
+               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_atom_source_hash_idx';
+             END IF;
+           END $$;`
+        );
+        await engine.runMigration(
+          104,
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_atom_source_hash_idx
+             ON pages ((frontmatter->>'source_hash'))
+             WHERE type = 'atom' AND deleted_at IS NULL;`
+        );
+      } else {
+        await engine.runMigration(
+          104,
+          `CREATE INDEX IF NOT EXISTS pages_atom_source_hash_idx
+             ON pages ((frontmatter->>'source_hash'))
+             WHERE type = 'atom' AND deleted_at IS NULL;`
+        );
+      }
+    },
+  },
+  {
+    version: 105,
+    name: 'slug_aliases',
+    // v0.41.22 type-unification wave (T1, plan D1+D11+D17).
+    // Backing table for the concept-redirect → alias-table migration: 5.5K
+    // concept-redirect pages in the reference production brain become rows
+    // here so wikilinks like `[[old-redirect-slug]]` resolve to the canonical
+    // page via `engine.resolveSlugWithAlias` short-circuit. Source-scoped
+    // unique key + source-scoped canonical index per F12 (dangling_aliases
+    // doctor check must use source-scoped JOIN to avoid cross-source false
+    // positives).
+    //
+    // Originally claimed v104; bumped to v105 after master merge from
+    // v0.41.21.0 wave took v104 for pages_atom_source_hash_idx.
+    //
+    // CHECK no-self-reference + UNIQUE (source_id, alias_slug). PGLite uses
+    // plain CREATE INDEX (no CONCURRENTLY); fresh installs also create the
+    // table via PGLITE_SCHEMA_SQL so this migration is a no-op there.
+    sql: '',
+    handler: async (engine) => {
+      await engine.runMigration(
+        105,
+        `CREATE TABLE IF NOT EXISTS slug_aliases (
+          id             BIGSERIAL PRIMARY KEY,
+          source_id      TEXT NOT NULL,
+          alias_slug     TEXT NOT NULL,
+          canonical_slug TEXT NOT NULL,
+          notes          TEXT,
+          created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT slug_aliases_no_self CHECK (alias_slug <> canonical_slug),
+          CONSTRAINT slug_aliases_uniq UNIQUE (source_id, alias_slug)
+        );`
+      );
+      await engine.runMigration(
+        105,
+        `CREATE INDEX IF NOT EXISTS slug_aliases_canonical_idx
+           ON slug_aliases (source_id, canonical_slug);`
+      );
+    },
+  },
+  {
+    version: 106,
+    name: 'extract_rollup_7d_table',
+    // v0.41.23 — Per-day rollup of extract events for fast doctor reads.
+    // Audit JSONL at ~/.gbrain/audit/extract-rounds-YYYY-Www.jsonl remains
+    // the SOURCE OF TRUTH (forensic, append-only, crash-safe). This DB
+    // table is a best-effort cache for doctor's <100ms read budget on
+    // heavy brains (per F-OUT-19 dual-write posture, JSONL primary).
+    //
+    // Per-day rows mean the 7-day window auto-evicts; doctor reads
+    // `WHERE day >= CURRENT_DATE - 7`. UPSERT on every audit event
+    // serializes via Postgres' INSERT ... ON CONFLICT DO UPDATE.
+    //
+    // Cycle's purge phase GCs rows older than 30 days (operational buffer
+    // beyond the 7-day read window).
+    //
+    // Slot history: originally claimed v100 in plan; bumped to v104 after
+    // v98/v99/v101/v102/v103 master merges; bumped again to v106 after
+    // v0.41.22 master merge took v104 (pages_atom_source_hash_idx) and
+    // v105 (slug_aliases).
+    sql: `
+      CREATE TABLE IF NOT EXISTS extract_rollup_7d (
+        kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        day DATE NOT NULL,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        halt_count INT NOT NULL DEFAULT 0,
+        eval_fail_count INT NOT NULL DEFAULT 0,
+        eval_pass_count INT NOT NULL DEFAULT 0,
+        round_completed_count INT NOT NULL DEFAULT 0,
+        rollup_write_failures INT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (kind, source_id, day)
+      );
+      CREATE INDEX IF NOT EXISTS idx_extract_rollup_7d_day
+        ON extract_rollup_7d (day);
+    `,
+  },
+  {
+    version: 107,
+    name: 'page_generation_clock_and_statement_trigger',
+    // v0.41.25.0 (D18/D19, codex outside-voice on /plan-eng-review): global
+    // page-generation clock + statement-level trigger.
+    //
+    // Renumbered v104 → v105 → v106 → v107 during master merges:
+    //   PR #1545 (v0.41.21.0 ops-fix-wave) took v104 for pages_atom_source_hash_idx;
+    //   PR #1542 (v0.41.22.0 type-unification cathedral) took v105 for slug_aliases;
+    //   PR #1541 (v0.41.23.0 extract operator surfaces) took v106 for extract_rollup_7d_table.
+    //
+    // Why this exists: the pre-v0.41.25.0 query-cache Layer 1 bookmark read
+    // `MAX(generation) FROM pages` to detect "writes happened since cache
+    // store". Two bugs in that contract — independent of any sync work:
+    //
+    //   1. The row-level `bump_page_generation_trg` (migration v91) sets
+    //      `NEW.generation = OLD.generation + 1` on UPDATE. Updating a
+    //      NON-MAX page didn't advance MAX(generation). Cache silently
+    //      served stale results for any UPDATE-to-non-max page.
+    //   2. The trigger is BEFORE INSERT OR UPDATE — DELETE doesn't fire it
+    //      at all. Even an AFTER DELETE wouldn't move MAX (surviving rows
+    //      are untouched).
+    //
+    // The fix: single-row counter, bumped per-statement (FOR EACH STATEMENT
+    // — row-level would turn a 73K-row batch DELETE into 73K UPDATEs on the
+    // same counter, recreating the bottleneck the sync-delete wave is
+    // fixing in this same PR). Layer 1 reads page_generation_clock.value
+    // directly. Per-row pages.generation stays for Layer 2 (per-page
+    // snapshot via jsonb_each + LEFT JOIN pages) which doesn't care about
+    // MAX, only per-page advancement.
+    //
+    // Seeded with COALESCE(MAX(pages.generation), 0) so existing
+    // query_cache rows stored under the old MAX semantics aren't all
+    // instantly invalidated on upgrade. Their max_generation_at_store
+    // stamp compares cleanly against the seeded clock; future writes bump
+    // the clock and the bookmark fires correctly.
+    //
+    // Mirror lives in src/core/pglite-schema.ts (fresh-install path).
+    // Forward-reference bootstrap probe in applyForwardReferenceBootstrap
+    // on both engines so pre-v0.41.25.0 brains pick it up cleanly.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS page_generation_clock (
+        id    INTEGER PRIMARY KEY CHECK (id = 1),
+        value BIGINT  NOT NULL DEFAULT 0
+      );
+      INSERT INTO page_generation_clock (id, value)
+        VALUES (1, COALESCE((SELECT MAX(generation) FROM pages), 0))
+        ON CONFLICT (id) DO NOTHING;
+
+      CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+      BEGIN
+        UPDATE page_generation_clock SET value = value + 1 WHERE id = 1;
+        RETURN NULL;
+      END;
+      $func$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS bump_page_generation_clock_trg ON pages;
+      CREATE TRIGGER bump_page_generation_clock_trg
+        AFTER INSERT OR UPDATE OR DELETE ON pages
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION bump_page_generation_clock_fn();
+    `,
+  },
+  {
+    version: 108,
+    name: 'pages_embedding_signature',
+    // v0.41.31 — embedding provenance for real stale semantics.
+    //
+    // Adds `pages.embedding_signature TEXT NULL` = `<provider:model>:<dims>`
+    // stamped when a page's chunks are embedded (setPageEmbeddingSignature).
+    // A later model/dimension swap makes the stored signature differ from
+    // the current one, so countStaleChunks/sumStaleChunkChars (with the
+    // `signature` opt) and invalidateStaleSignatureEmbeddings can detect and
+    // re-embed those pages.
+    //
+    // GRANDFATHER (critical): the stale predicate is
+    //   `embedding_signature IS NOT NULL AND embedding_signature <> $current`
+    // so a NULL signature is NEVER stale. After this migration every existing
+    // page has NULL — none are flagged — so the next `embed --stale` does NOT
+    // re-embed the whole corpus. Signatures only get stamped going forward.
+    //
+    // No index: the column is read only via a JOINed pages row in the
+    // chunk-grain stale queries; no standalone lookup hot path. ADD COLUMN
+    // with no DEFAULT (NULL) is metadata-only on Postgres 11+ / PGLite 17.5.
+    idempotent: true,
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS embedding_signature TEXT NULL;
+    `,
+  },
+  {
+    version: 109,
+    name: 'sources_newest_content_at',
+    // v0.41.32.0 (supersedes #1623): durable newest-COMMIT timestamp per source,
+    // written at sync time (HEAD committer time). The REMOTE staleness path
+    // (federation_health, get_status_snapshot MCP op) reads this column instead
+    // of shelling out to git on a DB-supplied local_path — preserving the
+    // v0.41.27.0 trust boundary while still killing the quiet-repo false-SEVERE
+    // alarm. ADD COLUMN with a NULL default is metadata-only on both engines
+    // (instant, no table rewrite). Mirror lives in pglite-schema.ts +
+    // schema.sql (fresh-install path) and the applyForwardReferenceBootstrap
+    // probe set in both engines. Renumbered 108→109 on the master merge that
+    // landed v0.41.31's pages_embedding_signature at v108.
+    idempotent: true,
+    sql: `ALTER TABLE sources ADD COLUMN IF NOT EXISTS newest_content_at TIMESTAMPTZ`,
+  },
+  {
+    version: 110,
+    name: 'page_aliases',
+    // T3 of the retrieval-cathedral wave (retrieval-maxpool incident).
+    //
+    // Free-text alias resolution: a query like "Hall of Light" or "明堂"
+    // should surface the page titled "Mingtang". gbrain stored that mapping
+    // in pages.frontmatter `aliases:` JSONB but it was invisible to search.
+    //
+    // DELIBERATELY SEPARATE from slug_aliases (v105). They answer different
+    // questions and overloading one for both would muddy the semantics:
+    //   - slug_aliases:  old-slug -> canonical-slug (wikilink/get_page redirect)
+    //   - page_aliases:  normalized free-text name -> canonical slug (search hop)
+    //
+    // alias_norm is the output of normalizeAlias() (NFKC + lowercase + ws
+    // collapse) so the WRITE side (ingest projection) and READ side (search)
+    // match on the same key. Btree on (source_id, alias_norm) so the hop is an
+    // indexed equality lookup, not ILIKE.
+    //
+    // NOT a UNIQUE(source_id, alias_norm) — real brains may legitimately have
+    // two pages claiming the same alias; we report the collision and resolve
+    // deterministically at query time rather than failing the ingest (Codex#8).
+    // The (source_id, alias_norm, slug) triple is unique so re-ingest is
+    // idempotent without blocking a second page's claim on the same alias.
+    //
+    // Mirror in src/core/pglite-schema.ts (fresh install); forward-reference
+    // bootstrap probe on both engines so pre-v110 brains pick it up cleanly.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS page_aliases (
+        id          BIGSERIAL PRIMARY KEY,
+        source_id   TEXT NOT NULL,
+        alias_norm  TEXT NOT NULL,
+        slug        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT page_aliases_uniq UNIQUE (source_id, alias_norm, slug)
+      );
+      CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
+        ON page_aliases (source_id, alias_norm);
+      CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
+        ON page_aliases (source_id, slug);
+    `,
+  },
+  {
+    version: 111,
+    name: 'search_telemetry_rank1_columns',
+    // T7 of the retrieval-cathedral wave — rank-1 base_score drift signal.
+    // Aggregate columns (NOT per-query rows, D10) so a downward drift in the
+    // median rank-1 match score is computable from the existing day/mode/intent
+    // rollup with bounded growth. search_telemetry lives only in migration v57
+    // (not the schema blobs), so these are ADD COLUMN IF NOT EXISTS on both
+    // engines; fresh installs pick them up right after v57 runs.
+    idempotent: true,
+    sql: `
+      ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS sum_rank1_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+      ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS count_rank1 INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS rank1_lt_solid INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS rank1_solid INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE search_telemetry ADD COLUMN IF NOT EXISTS rank1_high INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 112,
+    name: 'pages_links_extracted_at',
+    // v0.42.7 (#1696) — link-extraction freshness watermark.
+    //
+    // Closes the "imported ≠ curated" root cause: extraction is the silent third
+    // leg of `sync → extract → embed`, and a brain with autopilot off (the common
+    // CLI / external-cron case) accumulated 0% typed-edge coverage with nothing
+    // surfacing it. This column lets `gbrain extract --stale` sweep the historical
+    // backlog incrementally and the `links_extraction_lag` doctor check warn when
+    // extraction has fallen behind.
+    //
+    // A page is stale for extraction when:
+    //   links_extracted_at IS NULL                      (never extracted)
+    //   OR links_extracted_at < LINK_EXTRACTOR_VERSION_TS (extractor logic bumped)
+    //   OR updated_at > links_extracted_at              (edited since last extract —
+    //                                                    MCP put_page / sync --no-extract)
+    //
+    // GRANDFATHER: no backfill. After this migration every existing page has NULL
+    // links_extracted_at, so the first `gbrain doctor` correctly surfaces the real
+    // backlog (the whole point). The doctor check is warn-only by default; it only
+    // hard-fails if GBRAIN_EXTRACTION_LAG_FAIL_PCT is set — so the upgrade never
+    // breaks a CI/cron pipeline that gates on `gbrain doctor` exit code.
+    //
+    // Composite index (source_id, links_extracted_at) backs the source-scoped
+    // staleness scans. Postgres path uses CREATE INDEX CONCURRENTLY (+ invalid-
+    // remnant pre-drop, mirroring v97); PGLite uses plain CREATE INDEX. ADD COLUMN
+    // with no DEFAULT (NULL) is metadata-only on Postgres 11+ / PGLite 17.5.
+    //
+    // Mirror lives in src/schema.sql + pglite-schema.ts (fresh-install column +
+    // index) and the applyForwardReferenceBootstrap probe set in both engines.
+    sql: '',
+    transaction: false,
+    handler: async (engine) => {
+      await engine.runMigration(
+        112,
+        `ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;`
+      );
+      if (engine.kind === 'postgres') {
+        await engine.runMigration(
+          112,
+          `DO $$ BEGIN
+             IF EXISTS (
+               SELECT 1 FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE c.relname = 'pages_links_extracted_at_idx' AND NOT i.indisvalid
+             ) THEN
+               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_links_extracted_at_idx';
+             END IF;
+           END $$;`
+        );
+        await engine.runMigration(
+          112,
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_links_extracted_at_idx
+             ON pages (source_id, links_extracted_at);`
+        );
+      } else {
+        await engine.runMigration(
+          112,
+          `CREATE INDEX IF NOT EXISTS pages_links_extracted_at_idx
+             ON pages (source_id, links_extracted_at);`
+        );
+      }
+    },
+  },
+  {
+    version: 113,
+    name: 'links_link_source_widen_for_wikilink_basename',
+    // Issue #972: opt-in global-basename wikilink resolution (bare [[name]]
+    // resolved by slug tail) emits edges tagged
+    // `link_source = 'wikilink-resolved'`. Widen the CHECK to admit it.
+    //
+    // The FULL set is enumerated here — not just the new value — because
+    // DROP + re-ADD replaces the whole constraint. v95
+    // (links_link_source_check_includes_mentions) added 'mentions'; since
+    // this migration runs AFTER v95, omitting 'mentions' would silently
+    // clobber that widening. Keep both branches in sync with src/schema.sql
+    // and src/core/pglite-schema.ts.
+    //
+    // Renumbered v93 → v109 → v110 → v112 → v113 across successive master
+    // merges (upstream claimed through v112 — pages_links_extracted_at — in
+    // the interim). Idempotent via DROP ... IF EXISTS, so it no-ops on
+    // installs that never created the constraint.
+    idempotent: true,
+    sql: `
+      ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+      ALTER TABLE links ADD CONSTRAINT links_link_source_check
+        CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions', 'wikilink-resolved'));
+    `,
+    sqlFor: {
+      pglite: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions', 'wikilink-resolved'));
+      `,
+    },
+  },
+  {
+    version: 114,
+    name: 'links_link_source_check_kebab_regex',
+    // Issue #1941: open link_source from a closed allowlist to a kebab-case
+    // format gate so external derivers (e.g. 'citation-graph') stamp their own
+    // provenance without a per-deriver gbrain migration. Format: lowercase
+    // kebab `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` (rejects UPPER, leading digit/dash,
+    // trailing/double dash, underscore, space) + char_length <= 64 cap on the
+    // indexed free-text column. The five prior built-ins all satisfy the regex,
+    // so existing rows pass `VALIDATE` and the constraint swap never fails.
+    //
+    // DELIBERATELY diverges from the v95/v113 plain DROP+ADD pattern: on real
+    // Postgres a plain `ADD CONSTRAINT ... CHECK` takes ACCESS EXCLUSIVE + a
+    // full-table validation scan, which can stall writes on a large `links`
+    // table. The postgres branch instead does `ADD ... NOT VALID` (instant,
+    // no scan) then `VALIDATE CONSTRAINT` (scans under SHARE UPDATE EXCLUSIVE,
+    // does not block reads/writes). That two-phase form requires running
+    // OUTSIDE a transaction → `transaction: false`. PGLite (single-writer WASM,
+    // no lock concern) keeps the plain one-shot DROP+ADD, and is the branch the
+    // schema-version hash reads (pglite-engine.ts).
+    //
+    // Idempotent via DROP ... IF EXISTS; no-ops on installs that never created
+    // the constraint and safe to re-run.
+    idempotent: true,
+    transaction: false,
+    sql: '', // engine-specific via sqlFor (postgres two-phase vs pglite one-shot)
+    sqlFor: {
+      postgres: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64)) NOT VALID;
+        ALTER TABLE links VALIDATE CONSTRAINT links_link_source_check;
+      `,
+      pglite: `
+        ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+        ALTER TABLE links ADD CONSTRAINT links_link_source_check
+          CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64));
+      `,
+    },
+  },
+  {
+    version: 115,
+    name: 'op_checkpoint_paths_append_table',
+    // #1794 cathedral: append-only delta storage for op checkpoints. The parent
+    // op_checkpoints.completed_keys JSONB was rewritten in full on every flush —
+    // O(N^2) write bytes over a 204K-file sync. This child table banks one row
+    // per completed path; sync's appendCompleted INSERTs only the delta. The FK
+    // ON DELETE CASCADE makes clearOpCheckpoint + the 7-day purge drop children
+    // automatically. Created empty so the composite-PK index build is instant;
+    // no CONCURRENTLY / transaction:false needed (mirrors v75 op_checkpoints).
+    // The PK (op,fingerprint,path) btree's (op,fingerprint) prefix serves every
+    // read/delete, so no separate index. Keep in sync with src/schema.sql,
+    // src/core/pglite-schema.ts, src/core/schema-embedded.ts.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS op_checkpoint_paths (
+        op          TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        path        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (op, fingerprint, path),
+        CONSTRAINT op_checkpoint_paths_parent_fk
+          FOREIGN KEY (op, fingerprint) REFERENCES op_checkpoints (op, fingerprint) ON DELETE CASCADE
+      );
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

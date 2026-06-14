@@ -55,12 +55,14 @@ CHECKS=(
   "check:operations-filter-bypass"
   "check:gateway-routed"
   "check:worker-pool-atomicity"
+  "check:doc-history"
   "check:fixture-privacy"
   "check:conversation-parser"
   "check:resolver"
   "check:source-scope-onboard"
   "check:no-double-retry"
   "check:batch-audit-site"
+  "check:worker-lock-renewal-shape"
   "typecheck"
 )
 

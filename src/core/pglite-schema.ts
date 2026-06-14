@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS sources (
   -- FALSE for mounts by default; host is always trusted regardless.
   contextual_retrieval_mode   TEXT,
   trust_frontmatter_overrides BOOLEAN NOT NULL DEFAULT false,
+  -- v0.41.32.0 (supersedes #1623): newest COMMIT timestamp at last sync
+  -- (mirrors src/schema.sql). REMOTE staleness reads this; NULL → wall-clock.
+  newest_content_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -96,6 +99,10 @@ CREATE TABLE IF NOT EXISTS pages (
   -- v0.37.0 (migration v79): real stale-page signal for gbrain lsd
   -- (mirrors src/schema.sql). NULL = never retrieved.
   last_retrieved_at     TIMESTAMPTZ,
+  -- v0.42.7 (migration v112): link-extraction freshness watermark
+  -- (mirrors src/schema.sql). NULL = never extracted. Powers
+  -- gbrain extract --stale + the links_extraction_lag doctor check.
+  links_extracted_at    TIMESTAMPTZ,
   -- v0.40.3.0 contextual retrieval (renumbered from v81 to v90 on master
   -- merge; mirrors src/schema.sql).
   -- contextual_retrieval_mode is the tier the page was last embedded under;
@@ -144,6 +151,32 @@ CREATE TRIGGER bump_page_generation_trg
   FOR EACH ROW
   EXECUTE FUNCTION bump_page_generation_fn();
 
+-- v0.41.19.0 (D18/D19, mirror of src/schema.sql): global page-generation
+-- clock + statement-level trigger. See src/schema.sql for the full
+-- rationale comment. Layer 1 bookmark reads page_generation_clock.value;
+-- per-row pages.generation above stays as the Layer 2 (per-page snapshot)
+-- substrate.
+CREATE TABLE IF NOT EXISTS page_generation_clock (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  value BIGINT  NOT NULL DEFAULT 0
+);
+INSERT INTO page_generation_clock (id, value)
+  VALUES (1, COALESCE((SELECT MAX(generation) FROM pages), 0))
+  ON CONFLICT (id) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+BEGIN
+  UPDATE page_generation_clock SET value = value + 1 WHERE id = 1;
+  RETURN NULL;
+END;
+$func$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bump_page_generation_clock_trg ON pages;
+CREATE TRIGGER bump_page_generation_clock_trg
+  AFTER INSERT OR UPDATE OR DELETE ON pages
+  FOR EACH STATEMENT
+  EXECUTE FUNCTION bump_page_generation_clock_fn();
+
 CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
 CREATE INDEX IF NOT EXISTS idx_pages_frontmatter ON pages USING GIN(frontmatter);
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING GIN(title gin_trgm_ops);
@@ -158,6 +191,12 @@ CREATE INDEX IF NOT EXISTS pages_coalesce_date_idx
 -- query (mirrors src/schema.sql). Postgres handles NULL in B-tree indexes.
 CREATE INDEX IF NOT EXISTS pages_last_retrieved_at_idx
   ON pages (last_retrieved_at);
+-- v0.42.7 (migration v112): composite B-tree backing extract --stale and the
+-- links_extraction_lag doctor check (mirrors src/schema.sql). source_id leads so
+-- source-scoped staleness scans are indexed; NOT partial-NULL (predicate has a
+-- NULL arm AND a version-timestamp arm).
+CREATE INDEX IF NOT EXISTS pages_links_extracted_at_idx
+  ON pages (source_id, links_extracted_at);
 
 -- ============================================================
 -- content_chunks: chunked content with embeddings
@@ -216,10 +255,11 @@ CREATE TABLE IF NOT EXISTS links (
   to_page_id     INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
   link_type      TEXT    NOT NULL DEFAULT '',
   context        TEXT    NOT NULL DEFAULT '',
-  -- v0.41.18.0: 'mentions' added for auto-linked body-text mentions
-  -- (gbrain extract links --by-mention). Filtered OUT of backlink-count
-  -- for search ranking; only counts toward orphan-ratio + graph traversal.
-  link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions')),
+  -- v114 (#1941): open kebab-case provenance (not a closed allowlist) so
+  -- external derivers stamp their own tag. Format gate only: lowercase kebab,
+  -- <=64 chars. Managed built-ins still satisfy this; see src/schema.sql for
+  -- full rationale + the add_link op-layer guard against forging them.
+  link_source    TEXT    CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64)),
   -- v0.41.18.0 (codex finding #12): nullable link_kind distinguishes
   -- "plain body mention" from "verb-pattern-derived typed link" within
   -- link_source='mentions'. See src/schema.sql for full rationale.
@@ -891,6 +931,20 @@ CREATE TABLE IF NOT EXISTS op_checkpoints (
 CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
   ON op_checkpoints (updated_at);
 
+-- #1794: append-only delta storage (one row per completed path). FK cascade
+-- drops children with the parent. PK prefix (op,fingerprint) serves all reads.
+-- Mirrors migration v115 + src/schema.sql. Placed after op_checkpoints so the
+-- FK target exists in the top-to-bottom replay.
+CREATE TABLE IF NOT EXISTS op_checkpoint_paths (
+  op          TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (op, fingerprint, path),
+  CONSTRAINT op_checkpoint_paths_parent_fk
+    FOREIGN KEY (op, fingerprint) REFERENCES op_checkpoints (op, fingerprint) ON DELETE CASCADE
+);
+
 -- ============================================================
 -- migration_impact_log (v0.41.18.0 — gbrain onboard wave)
 -- ============================================================
@@ -952,6 +1006,44 @@ CREATE TRIGGER trg_pages_search_vector
 -- pages.timeline (markdown) still feeds search_vector via trg_pages_search_vector.
 DROP TRIGGER IF EXISTS trg_timeline_search_vector ON timeline_entries;
 DROP FUNCTION IF EXISTS update_page_search_vector_from_timeline();
+
+-- v0.42 type-unification (T1, plan D1+D11+D17): slug_aliases backs the
+-- concept-redirect → alias-table migration. Wikilinks like
+-- [[old-redirect-slug]] resolve to canonical via engine.resolveSlugWithAlias
+-- short-circuit. Source-scoped throughout (codex F12: dangling_aliases
+-- doctor check joins on (source_id, alias_slug)).
+CREATE TABLE IF NOT EXISTS slug_aliases (
+  id             BIGSERIAL PRIMARY KEY,
+  source_id      TEXT NOT NULL,
+  alias_slug     TEXT NOT NULL,
+  canonical_slug TEXT NOT NULL,
+  notes          TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT slug_aliases_no_self CHECK (alias_slug <> canonical_slug),
+  CONSTRAINT slug_aliases_uniq UNIQUE (source_id, alias_slug)
+);
+CREATE INDEX IF NOT EXISTS slug_aliases_canonical_idx
+  ON slug_aliases (source_id, canonical_slug);
+
+-- T3 retrieval-cathedral (retrieval-maxpool incident): free-text alias
+-- resolution for SEARCH. Distinct from slug_aliases (slug->slug wikilink
+-- redirect): page_aliases maps a normalized free-text name ("hall of light",
+-- "明堂") to a canonical slug so a query that is a chosen name surfaces the
+-- page. alias_norm is normalizeAlias() output; the (source_id, alias_norm,
+-- slug) triple is unique so re-ingest is idempotent without blocking a second
+-- page claiming the same alias (collisions reported + resolved at query time).
+CREATE TABLE IF NOT EXISTS page_aliases (
+  id          BIGSERIAL PRIMARY KEY,
+  source_id   TEXT NOT NULL,
+  alias_norm  TEXT NOT NULL,
+  slug        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT page_aliases_uniq UNIQUE (source_id, alias_norm, slug)
+);
+CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
+  ON page_aliases (source_id, alias_norm);
+CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
+  ON page_aliases (source_id, slug);
 `;
 
 /**

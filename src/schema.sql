@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS sources (
   -- (id='default') is always trusted regardless of this column.
   contextual_retrieval_mode   TEXT,
   trust_frontmatter_overrides BOOLEAN NOT NULL DEFAULT false,
+  -- v0.41.32.0 (supersedes #1623): newest COMMIT timestamp (HEAD committer
+  -- time) recorded at last sync. The REMOTE staleness path reads this instead
+  -- of shelling out to git on a DB-supplied local_path, preserving the
+  -- v0.41.27.0 trust boundary. NULL → reader falls back to wall-clock.
+  newest_content_at TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -119,6 +124,14 @@ CREATE TABLE IF NOT EXISTS pages (
   -- (NOT inside engine methods — internal callers must not pollute the
   -- signal). NULL = never retrieved (LSD prioritizes these first).
   last_retrieved_at     TIMESTAMPTZ,
+  -- v0.42.7 (migration v112): link-extraction freshness watermark. Set when
+  -- link/timeline extraction last ran for this page (inline sync, `extract
+  -- --source db`, or `extract --stale`). A page is stale for extraction when
+  -- this is NULL, older than LINK_EXTRACTOR_VERSION_TS, or older than
+  -- updated_at (edited-since-extract — the MCP put_page / sync --no-extract
+  -- path). Powers `gbrain extract --stale` + the `links_extraction_lag` doctor
+  -- check. NULL = never extracted.
+  links_extracted_at    TIMESTAMPTZ,
   -- v0.40.3.0 contextual retrieval (renumbered from v81 to v90 on master
   -- merge). contextual_retrieval_mode is what tier the page was last embedded
   -- under (NULL = pre-v90 = treated as 'none' for drift detection).
@@ -181,6 +194,48 @@ CREATE TRIGGER bump_page_generation_trg
 -- CREATE INDEX since the table is empty.
 CREATE INDEX IF NOT EXISTS pages_generation_idx ON pages (generation);
 
+-- v0.41.19.0 (D18/D19, codex outside-voice): global page-generation clock.
+-- The pre-v0.41.19.0 Layer 1 bookmark read `MAX(generation) FROM pages` to
+-- detect "writes happened since cache-store". Two bugs in that contract:
+--   1. The row-level trigger above sets `NEW.generation = OLD.generation + 1`
+--      on UPDATE. Updating a NON-MAX page didn't advance MAX(generation),
+--      silently serving stale cached results.
+--   2. The trigger is `BEFORE INSERT OR UPDATE` so DELETE doesn't fire it
+--      at all — and even if it did, DELETE doesn't touch surviving rows,
+--      so MAX(generation) wouldn't budge.
+--
+-- The fix: a single-row counter, bumped per-statement (FOR EACH STATEMENT
+-- — codex CDX-4: per-row would turn 73K-row batch DELETE into 73K UPDATEs
+-- on the same counter, recreating the bottleneck this PR is fixing). Layer
+-- 1 reads `page_generation_clock.value` directly. The per-row
+-- `pages.generation` column above stays as the Layer 2 (per-page snapshot)
+-- substrate.
+--
+-- Seeded with COALESCE(MAX(pages.generation), 0) so existing query_cache
+-- rows stored under the old MAX semantics aren't all instantly invalidated
+-- on upgrade (their max_generation_at_store stamp compares cleanly against
+-- the seeded clock; future writes bump the clock, bookmark fires correctly).
+CREATE TABLE IF NOT EXISTS page_generation_clock (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  value BIGINT  NOT NULL DEFAULT 0
+);
+INSERT INTO page_generation_clock (id, value)
+  VALUES (1, COALESCE((SELECT MAX(generation) FROM pages), 0))
+  ON CONFLICT (id) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+BEGIN
+  UPDATE page_generation_clock SET value = value + 1 WHERE id = 1;
+  RETURN NULL;
+END;
+$func$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bump_page_generation_clock_trg ON pages;
+CREATE TRIGGER bump_page_generation_clock_trg
+  AFTER INSERT OR UPDATE OR DELETE ON pages
+  FOR EACH STATEMENT
+  EXECUTE FUNCTION bump_page_generation_clock_fn();
+
 CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
 CREATE INDEX IF NOT EXISTS idx_pages_frontmatter ON pages USING GIN(frontmatter);
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING GIN(title gin_trgm_ops);
@@ -202,6 +257,15 @@ CREATE INDEX IF NOT EXISTS pages_deleted_at_purge_idx
 -- would miss the NULL branch that LSD prioritizes (codex round 2 #6).
 CREATE INDEX IF NOT EXISTS pages_last_retrieved_at_idx
   ON pages (last_retrieved_at);
+-- v0.42.7 (migration v112): composite B-tree backing `extract --stale` and the
+-- `links_extraction_lag` doctor check. source_id leads so source-scoped staleness
+-- scans (`extract --stale --source X`, `gbrain doctor --source X`) are indexed;
+-- the brain-wide COUNT still uses it via the leading column. NOT partial-NULL —
+-- the staleness predicate has a NULL arm AND a `< $versionTs` arm (B-tree sorts
+-- NULLs to one end, covering both). The `updated_at > links_extracted_at` arm is
+-- a cross-column filter no index covers; acceptable for a watermark COUNT.
+CREATE INDEX IF NOT EXISTS pages_links_extracted_at_idx
+  ON pages (source_id, links_extracted_at);
 -- v0.29.1: expression index used by since/until date-range filters that read
 -- COALESCE(effective_date, updated_at). A partial index on effective_date
 -- alone would NOT help — the planner can't use it for the negative side of
@@ -343,9 +407,24 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_to
 -- ============================================================
 -- links: cross-references between pages
 -- ============================================================
--- Provenance model (v0.13):
---   link_source       — 'markdown' | 'frontmatter' | 'manual' | NULL
---                       (NULL = legacy row written before v0.13; unknown source)
+-- Provenance model (v0.13; opened to kebab provenance in v114 / issue #1941):
+--   link_source       — open kebab-case provenance tag, NOT a closed allowlist.
+--                       Format gate (CHECK): ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ and
+--                       char_length <= 64. NULL = legacy row (pre-v0.13).
+--                       Reconciliation-managed built-ins written internally:
+--                         'markdown'         — body markdown links
+--                         'frontmatter'      — YAML frontmatter edges (see origin_*)
+--                         'mentions'         — auto-linked body-text mentions
+--                         'wikilink-resolved'— opt-in global-basename [[name]] (#972)
+--                       User/tool-facing:
+--                         'manual'           — hand- or tool-created edges (the
+--                                              add_link op default + CLI link-add)
+--                         '<your-tag>'       — external derivers, e.g. 'citation-graph',
+--                                              stamp their own kebab tag (no migration).
+--                       The add_link OP forbids callers from passing the four
+--                       managed built-ins (they imply reconciliation semantics a
+--                       hand-created row can't honor); the DB CHECK still admits
+--                       them because internal writers use them. See operations.ts.
 --   origin_page_id    — for link_source='frontmatter', the page whose YAML
 --                       frontmatter created this edge; scopes reconciliation
 --   origin_field      — the frontmatter field name (e.g. 'key_people')
@@ -353,7 +432,9 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_to
 -- The unique constraint includes link_source + origin_page_id so a manual edge
 -- and a frontmatter-derived edge with the same (from, to, type) tuple coexist.
 -- Reconciliation on put_page filters by (link_source='frontmatter' AND
--- origin_page_id = written_page) — never touches other pages' edges.
+-- origin_page_id = written_page) — never touches other pages' edges. (This is
+-- exactly why a CLI-forged 'frontmatter' row with NULL origin would be a phantom
+-- edge reconciliation never cleans — hence the op-layer guard.)
 CREATE TABLE IF NOT EXISTS links (
   id             SERIAL PRIMARY KEY,
   from_page_id   INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -363,7 +444,9 @@ CREATE TABLE IF NOT EXISTS links (
   -- v0.41.18.0: 'mentions' added for auto-linked body-text mentions
   -- (gbrain extract links --by-mention). Filtered OUT of backlink-count
   -- for search ranking; only counts toward orphan-ratio + graph traversal.
-  link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions')),
+  -- v0.40.8.2 (#972): 'wikilink-resolved' added for opt-in global-basename
+  -- wikilink resolution (bare [[name]] resolved by slug tail).
+  link_source    TEXT    CHECK (link_source IS NULL OR (link_source ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' AND char_length(link_source) <= 64)),
   -- v0.41.18.0: nullable link_kind distinguishes "plain body mention" from
   -- "verb-pattern-derived typed link" within link_source='mentions'.
   -- Codex finding #12 design: keep link_source stable; add link_kind
@@ -600,38 +683,24 @@ CREATE TABLE IF NOT EXISTS op_checkpoints (
 CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
   ON op_checkpoints (updated_at);
 
--- ============================================================
--- migration_impact_log: before/after metric stats per onboard remediation
--- ============================================================
--- v0.41.18.0 (gbrain onboard wave). Every completion captured by the
--- onboard remediation pipeline records before/after metric stats so
--- `gbrain onboard --history --json` can show "you reduced orphans 47%".
--- delta computed at read time (NOT a stored GENERATED column —
--- zero PGLite parity risk per eng-review D2).
---
--- Attribution columns (job_id, source_id, brain_id, started_at,
--- idempotency_key) per codex finding #10 so concurrent onboard /
--- autopilot / manual runs can't misattribute deltas to the wrong
--- migration when overlapping runs change the same metric.
-CREATE TABLE IF NOT EXISTS migration_impact_log (
-  id              BIGSERIAL PRIMARY KEY,
-  remediation_id  TEXT      NOT NULL,
-  metric_name     TEXT      NOT NULL,
-  metric_before   NUMERIC,
-  metric_after    NUMERIC,
-  job_id          BIGINT    REFERENCES minion_jobs(id) ON DELETE SET NULL,
-  source_id       TEXT,
-  brain_id        TEXT,
-  started_at      TIMESTAMPTZ,
-  idempotency_key TEXT,
-  applied_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  applied_by      TEXT,
-  details         JSONB     DEFAULT '{}'::jsonb
+-- #1794: append-only delta storage. One row per completed path; sync's
+-- appendCompleted INSERTs only the delta instead of rewriting the whole
+-- completed_keys JSONB array each flush (O(N^2) -> O(delta)). FK cascade drops
+-- children with the parent (clearOpCheckpoint + 7-day purge). PK prefix
+-- (op,fingerprint) serves all reads; no separate index. Mirrors migration v115.
+CREATE TABLE IF NOT EXISTS op_checkpoint_paths (
+  op          TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (op, fingerprint, path),
+  CONSTRAINT op_checkpoint_paths_parent_fk
+    FOREIGN KEY (op, fingerprint) REFERENCES op_checkpoints (op, fingerprint) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS migration_impact_log_remediation_idx
-  ON migration_impact_log(remediation_id, applied_at DESC);
-CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
-  ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
+
+-- migration_impact_log moved BELOW minion_jobs (was here, lines 645-676)
+-- because its `job_id BIGINT REFERENCES minion_jobs(id)` FK requires
+-- minion_jobs to exist FIRST during SCHEMA_SQL replay. v0.41.25.0 fix.
 
 -- ============================================================
 -- files: binary attachments stored in Supabase Storage
@@ -820,6 +889,50 @@ CREATE TABLE IF NOT EXISTS minion_attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_minion_attachments_job ON minion_attachments (job_id);
 ALTER TABLE minion_attachments ALTER COLUMN content SET STORAGE EXTERNAL;
+
+-- ============================================================
+-- migration_impact_log: before/after metric stats per onboard remediation
+-- ============================================================
+-- v0.41.18.0 (gbrain onboard wave). Every completion captured by the
+-- onboard remediation pipeline records before/after metric stats so
+-- `gbrain onboard --history --json` can show "you reduced orphans 47%".
+-- delta computed at read time (NOT a stored GENERATED column —
+-- zero PGLite parity risk per eng-review D2).
+--
+-- Attribution columns (job_id, source_id, brain_id, started_at,
+-- idempotency_key) per codex finding #10 so concurrent onboard /
+-- autopilot / manual runs can't misattribute deltas to the wrong
+-- migration when overlapping runs change the same metric.
+--
+-- v0.41.25.0 SCHEMA_SQL ordering fix: this block lives AFTER the
+-- minion_jobs CREATE TABLE so the `job_id REFERENCES minion_jobs(id)`
+-- FK can resolve on fresh-install schema replay. Originally placed above
+-- minion_jobs in v0.41.18.0; that fired ERROR: relation "minion_jobs"
+-- does not exist on every fresh-install initSchema() (silent on master
+-- because postgres-js's unsafe() continued past the error, but the
+-- table never got created so any later query on migration_impact_log
+-- threw 42P01 — which cascaded as "relation minion_jobs does not exist"
+-- whenever subsequent statements that referenced minion_jobs ran AFTER
+-- the failed CREATE TABLE statement, aborting the entire SCHEMA_SQL batch).
+CREATE TABLE IF NOT EXISTS migration_impact_log (
+  id              BIGSERIAL PRIMARY KEY,
+  remediation_id  TEXT      NOT NULL,
+  metric_name     TEXT      NOT NULL,
+  metric_before   NUMERIC,
+  metric_after    NUMERIC,
+  job_id          BIGINT    REFERENCES minion_jobs(id) ON DELETE SET NULL,
+  source_id       TEXT,
+  brain_id        TEXT,
+  started_at      TIMESTAMPTZ,
+  idempotency_key TEXT,
+  applied_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_by      TEXT,
+  details         JSONB     DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS migration_impact_log_remediation_idx
+  ON migration_impact_log(remediation_id, applied_at DESC);
+CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
+  ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
 
 -- ============================================================
 -- Subagent runtime (v0.16.0) — durable LLM loops
