@@ -1480,7 +1480,10 @@ function installWindowsStartupFolder(wrapperPath: string, repoPath: string) {
   const safeWrapper = wrapperPath.replace(/"/g, '""');
   const cmd = `@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "${safeWrapper}"\r\n`;
   try {
-    mkdirSync(windowsStartupFolder(), { recursive: true });
+    const startupDir = windowsStartupFolder();
+    if (!existsSync(startupDir)) {
+      mkdirSync(startupDir, { recursive: true });
+    }
     writeFileSync(startupCmd, cmd, 'utf8');
     console.log(`Installed Startup folder entry: ${startupCmd}`);
     console.log(`  Repo: ${repoPath}`);
