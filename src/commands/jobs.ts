@@ -1189,7 +1189,10 @@ HANDLER TYPES (built in)
       if (detach) {
         const { spawn } = await import('child_process');
         const childArgs = process.argv.slice(2).filter(a => a !== '--detach');
-        const child = spawn(process.execPath, [process.argv[1], ...childArgs], {
+        // Compiled Bun binaries use argv.slice(2) for subcommands — not
+        // [execPath, argv[1], ...]. Re-exec via the resolved CLI path so
+        // Windows Bun embed paths (B:/~BUN/root/gbrain*.exe) are never used.
+        const child = spawn(cliPath, childArgs, {
           detached: true,
           stdio: ['ignore', 'ignore', 'inherit'],
           env: process.env,

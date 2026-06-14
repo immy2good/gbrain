@@ -10,7 +10,27 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { resolveGbrainCliPath } from '../src/commands/autopilot.ts';
+import {
+  resolveGbrainCliPath,
+  isEmbeddedBunCliPath,
+  isGbrainExecutablePath,
+} from '../src/commands/autopilot.ts';
+
+describe('isEmbeddedBunCliPath', () => {
+  test('detects Bun compile embed paths on Windows', () => {
+    expect(isEmbeddedBunCliPath('B:/~BUN/root/gbrain-new.exe')).toBe(true);
+    expect(isEmbeddedBunCliPath('C:\\Users\\itrad\\.bun\\bin\\gbrain.exe')).toBe(false);
+  });
+});
+
+describe('isGbrainExecutablePath', () => {
+  test('accepts normal installs and rejects embed/ts paths', () => {
+    expect(isGbrainExecutablePath('C:\\Users\\itrad\\.bun\\bin\\gbrain.exe')).toBe(true);
+    expect(isGbrainExecutablePath('/usr/local/bin/gbrain')).toBe(true);
+    expect(isGbrainExecutablePath('B:/~BUN/root/gbrain-new.exe')).toBe(false);
+    expect(isGbrainExecutablePath('/project/src/cli.ts')).toBe(false);
+  });
+});
 
 describe('resolveGbrainCliPath', () => {
   test('returns a non-empty string or throws with a clear install hint', () => {
@@ -77,6 +97,22 @@ describe('resolveGbrainCliPath', () => {
       // without, argv[1] fallback fires. Either way the result is valid.
       expect(path.endsWith('/gbrain') || path.endsWith('\\gbrain.exe')).toBe(true);
     } finally {
+      process.argv[1] = origArg1;
+    }
+  });
+
+  test('PATH wins over Bun embed execPath on Windows', () => {
+    const origExec = (process as { execPath?: string }).execPath;
+    const origArg1 = process.argv[1];
+    (process as { execPath?: string }).execPath = 'B:/~BUN/root/gbrain-new.exe';
+    process.argv[1] = 'jobs';
+    try {
+      const path = resolveGbrainCliPath();
+      expect(isEmbeddedBunCliPath(path)).toBe(false);
+    } catch (e) {
+      expect((e as Error).message).toMatch(/PATH|resolve/i);
+    } finally {
+      if (origExec) (process as { execPath?: string }).execPath = origExec;
       process.argv[1] = origArg1;
     }
   });
