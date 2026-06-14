@@ -1062,6 +1062,19 @@ function ephemeralStartScriptPath(): string {
 export type InstallTarget = 'macos' | 'linux-systemd' | 'ephemeral-container' | 'linux-cron' | 'windows-schtasks';
 
 const WINDOWS_SCHTASKS_NAME = 'gbrain-autopilot';
+const WINDOWS_STARTUP_CMD = 'gbrain-autopilot.cmd';
+
+function windowsStartupFolder(): string {
+  const appData = process.env.APPDATA;
+  if (!appData) {
+    throw new Error('APPDATA is not set; cannot install Windows logon startup entry.');
+  }
+  return join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+}
+
+function windowsStartupCmdPath(): string {
+  return join(windowsStartupFolder(), WINDOWS_STARTUP_CMD);
+}
 
 /**
  * Detect the right supervisor for this host.
@@ -1446,7 +1459,35 @@ function installWindowsSchtasks(wrapperPath: string, repoPath: string) {
     console.log(`  Wrapper: ${wrapperPath}`);
     console.log('  Uninstall: gbrain autopilot --uninstall');
   } catch (e: unknown) {
-    console.error(`Failed to install scheduled task: ${e instanceof Error ? e.message : e}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/access is denied|elevation|privilege|0x80070005/i.test(msg)) {
+      console.warn(`Scheduled task install denied (${msg.trim()}). Falling back to Startup folder (no elevation).`);
+      installWindowsStartupFolder(wrapperPath, repoPath);
+      return;
+    }
+    console.error(`Failed to install scheduled task: ${msg}`);
+    process.exit(1);
+  }
+}
+
+function installWindowsStartupFolder(wrapperPath: string, repoPath: string) {
+  const startupCmd = windowsStartupCmdPath();
+  if (existsSync(startupCmd)) {
+    console.log(`Startup entry already exists: ${startupCmd}`);
+    console.log('  Remove with: gbrain autopilot --uninstall');
+    return;
+  }
+  const safeWrapper = wrapperPath.replace(/"/g, '""');
+  const cmd = `@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "${safeWrapper}"\r\n`;
+  try {
+    mkdirSync(windowsStartupFolder(), { recursive: true });
+    writeFileSync(startupCmd, cmd, 'utf8');
+    console.log(`Installed Startup folder entry: ${startupCmd}`);
+    console.log(`  Repo: ${repoPath}`);
+    console.log(`  Wrapper: ${wrapperPath}`);
+    console.log('  Uninstall: gbrain autopilot --uninstall');
+  } catch (e: unknown) {
+    console.error(`Failed to install Startup folder entry: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
   }
 }
@@ -1579,6 +1620,18 @@ function uninstallDaemon() {
     /* task not installed */
   }
 
+  // Windows Startup folder fallback (non-elevated logon hook)
+  const startupCmd = windowsStartupCmdPath();
+  if (existsSync(startupCmd)) {
+    try {
+      unlinkSync(startupCmd);
+      console.log(`Removed Startup folder entry: ${startupCmd}`);
+      removed++;
+    } catch (e) {
+      console.error(`  [warn] startup: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   // Wrapper script — shared by all targets
   for (const path of [wrapperPath, wrapperPs1Path]) {
     if (existsSync(path)) {
@@ -1609,7 +1662,9 @@ function showStatus(json: boolean) {
     try {
       execSync(`schtasks /Query /TN "${WINDOWS_SCHTASKS_NAME}"`, { stdio: 'pipe' });
       installed = true;
-    } catch { /* no task */ }
+    } catch {
+      installed = existsSync(windowsStartupCmdPath());
+    }
   } else {
     try {
       const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });

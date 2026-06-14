@@ -144,7 +144,9 @@ Each phase is idempotent. Re-running is safe. Common failure modes:
   detected target. Pass `--target <macos|linux-systemd|ephemeral-container|linux-cron|windows-schtasks>`
   explicitly. On native Windows, `--install` registers a logon scheduled task
   that starts `gbrain jobs supervisor --detach` then `gbrain autopilot --no-worker`
-  (supervisor owns the worker; autopilot dispatches cycles only).
+  (supervisor owns the worker; autopilot dispatches cycles only). If Task
+  Scheduler returns Access denied, install falls back to a Startup-folder `.cmd`
+  hook (no elevation).
 - **Pending host work never clears:** your host agent hasn't shipped
   handler registrations yet. Read
   `~/.gbrain/migrations/pending-host-work.jsonl`, open
