@@ -58,6 +58,24 @@ import { parseGlobalFlags } from './cli-options.ts';
 
 const DAEMON_COMMANDS: ReadonlySet<string> = new Set(['serve']);
 
+/** Long-running subcommands that must survive past main()'s flushThenExit seam. */
+function isDaemonSubcommand(command: string, rest: string[]): boolean {
+  if (command === 'jobs') {
+    const sub = rest[1];
+    if (sub === 'work') return true;
+    if (sub === 'supervisor') {
+      const action = rest[2];
+      return action === undefined || action === 'start' || action === '--detach' ||
+        rest.includes('--detach');
+    }
+    return false;
+  }
+  if (command === 'autopilot') {
+    return !rest.includes('--install') && !rest.includes('--uninstall');
+  }
+  return false;
+}
+
 export function shouldForceExitAfterMain(
   argv: string[] = process.argv.slice(2),
 ): boolean {
@@ -67,14 +85,17 @@ export function shouldForceExitAfterMain(
   // heuristic saw `30s` as the command for `gbrain --timeout 30s serve` and
   // (post-#2084, where this gates an unconditional process.exit) would have
   // killed the daemon ~250ms after boot. Cross-model adversarial finding.
-  let command: string | undefined;
+  let rest: string[];
   try {
-    command = parseGlobalFlags(argv).rest[0];
+    rest = parseGlobalFlags(argv).rest;
   } catch {
-    command = argv.find((arg) => !arg.startsWith('-'));
+    rest = argv.filter((arg) => !arg.startsWith('-'));
   }
+  const command = rest[0];
   if (!command) return true;
-  return !DAEMON_COMMANDS.has(command);
+  if (DAEMON_COMMANDS.has(command)) return false;
+  if (isDaemonSubcommand(command, rest)) return false;
+  return true;
 }
 
 /** Floor for the computed backstop deadline (the historical hard deadline). */

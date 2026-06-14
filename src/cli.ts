@@ -175,20 +175,23 @@ function maybeEmitUpdateMarker(command: string): void {
     // Stale/missing cache → kick a detached, single-flighted refresh. The child
     // (`check-update --refresh-cache`) single-flights via the refresh lock and
     // writes the cache for the NEXT invocation. We never wait on it.
-    try {
-      const child = spawn('gbrain', ['check-update', '--refresh-cache'], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, GBRAIN_SKIP_STARTUP_HOOKS: '1' },
-      });
-      // ChildProcess is an EventEmitter — an unhandled 'error' (e.g. ENOENT when
-      // gbrain isn't on PATH) would throw uncaught. Swallow it; the refresh is
-      // best-effort.
-      child.on('error', () => {});
-      child.unref();
-    } catch {
-      /* gbrain not on PATH / spawn failed — fail-open, no refresh this run */
-    }
+    void (async () => {
+      try {
+        const { resolveGbrainCliPath } = await import('./commands/autopilot.ts');
+        const { buildDetachedCliSpawnOptions } = await import('./core/minions/spawn-helpers.ts');
+        const cliPath = resolveGbrainCliPath();
+        const child = spawn(cliPath, ['check-update', '--refresh-cache'], {
+          ...buildDetachedCliSpawnOptions({ ...process.env, GBRAIN_SKIP_STARTUP_HOOKS: '1' }),
+        });
+        // ChildProcess is an EventEmitter — an unhandled 'error' (e.g. ENOENT when
+        // gbrain isn't on PATH) would throw uncaught. Swallow it; the refresh is
+        // best-effort.
+        child.on('error', () => {});
+        child.unref();
+      } catch {
+        /* gbrain not on PATH / spawn failed — fail-open, no refresh this run */
+      }
+    })();
   } catch {
     /* the update marker must never break a command */
   }

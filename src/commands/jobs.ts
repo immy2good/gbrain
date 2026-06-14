@@ -1188,15 +1188,12 @@ HANDLER TYPES (built in)
       // if they wanted to follow logs) but detaching stdin/stdout.
       if (detach) {
         const { spawn } = await import('child_process');
+        const { buildDetachedCliSpawnOptions } = await import('../core/minions/spawn-helpers.ts');
         const childArgs = process.argv.slice(2).filter(a => a !== '--detach');
         // Compiled Bun binaries use argv.slice(2) for subcommands — not
         // [execPath, argv[1], ...]. Re-exec via the resolved CLI path so
         // Windows Bun embed paths (B:/~BUN/root/gbrain*.exe) are never used.
-        const child = spawn(cliPath, childArgs, {
-          detached: true,
-          stdio: ['ignore', 'ignore', 'inherit'],
-          env: process.env,
-        });
+        const child = spawn(cliPath, childArgs, buildDetachedCliSpawnOptions(process.env));
         child.unref();
         const payload = {
           event: 'started',

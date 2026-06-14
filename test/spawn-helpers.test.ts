@@ -9,7 +9,12 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { buildSpawnInvocation, detectTini } from '../src/core/minions/spawn-helpers.ts';
+import {
+  buildDetachedCliSpawnOptions,
+  buildSpawnInvocation,
+  buildSupervisedWorkerSpawnOptions,
+  detectTini,
+} from '../src/core/minions/spawn-helpers.ts';
 
 describe('buildSpawnInvocation', () => {
   test('without tini: returns cliPath + raw args', () => {
@@ -44,5 +49,55 @@ describe('detectTini', () => {
     // Do NOT assert truthiness: tini may or may not be installed on the
     // test host. We only verify the function doesn't throw and returns
     // a defined string ('' when absent, path when present).
+  });
+});
+
+describe('buildSupervisedWorkerSpawnOptions', () => {
+  test('Windows hides console and ignores stdio outside test runs', () => {
+    const originalPlatform = process.platform;
+    const originalNodeEnv = process.env.NODE_ENV;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    delete process.env.NODE_ENV;
+    try {
+      const opts = buildSupervisedWorkerSpawnOptions({ GBRAIN_SUPERVISED: '1' });
+      expect(opts.windowsHide).toBe(true);
+      expect(opts.stdio).toBe('ignore');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
+  test('non-Windows inherits stdio', () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      const opts = buildSupervisedWorkerSpawnOptions({ GBRAIN_SUPERVISED: '1' });
+      expect(opts.stdio).toBe('inherit');
+      expect(opts.windowsHide).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original });
+    }
+  });
+});
+
+describe('buildDetachedCliSpawnOptions', () => {
+  test('Windows detached spawn is hidden with ignored stdio outside test runs', () => {
+    const originalPlatform = process.platform;
+    const originalNodeEnv = process.env.NODE_ENV;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    delete process.env.NODE_ENV;
+    try {
+      const opts = buildDetachedCliSpawnOptions({ FOO: 'bar' });
+      expect(opts.detached).toBe(true);
+      expect(opts.windowsHide).toBe(true);
+      expect(opts.stdio).toBe('ignore');
+      expect(opts.env).toEqual({ FOO: 'bar' });
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
   });
 });

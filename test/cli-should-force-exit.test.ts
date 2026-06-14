@@ -82,4 +82,20 @@ describe('shouldForceExitAfterMain — daemon survival gate', () => {
     expect(shouldForceExitAfterMain(['serves'])).toBe(true);
     expect(shouldForceExitAfterMain(['serve-cluster'])).toBe(true);
   });
+
+  test('returns false for long-running jobs/autopilot daemons', () => {
+    expect(shouldForceExitAfterMain(['jobs', 'work'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'start'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'start', '--detach'])).toBe(false);
+    expect(shouldForceExitAfterMain(['autopilot', '--no-worker', '--repo', '/tmp/brain'])).toBe(false);
+  });
+
+  test('returns true for one-shot jobs/autopilot commands', () => {
+    expect(shouldForceExitAfterMain(['jobs', 'list'])).toBe(true);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'status'])).toBe(true);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'stop'])).toBe(true);
+    expect(shouldForceExitAfterMain(['autopilot', '--install'])).toBe(true);
+    expect(shouldForceExitAfterMain(['autopilot', '--uninstall'])).toBe(true);
+  });
 });

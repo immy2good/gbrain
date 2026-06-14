@@ -37,7 +37,11 @@
  */
 
 import { spawn, type ChildProcess } from 'child_process';
-import { buildSpawnInvocation, detectTini } from './spawn-helpers.ts';
+import {
+  buildSpawnInvocation,
+  buildSupervisedWorkerSpawnOptions,
+  detectTini,
+} from './spawn-helpers.ts';
 import { classifyWorkerExit } from './exit-classification.ts';
 import { calculateBackoffMs } from './supervisor.ts';
 import { WORKER_EXIT_RSS_WATCHDOG } from './worker-exit-codes.ts';
@@ -323,10 +327,7 @@ export class ChildWorkerSupervisor {
 
       let child: ChildProcess;
       try {
-        child = spawn(spawnCmd, spawnArgs, {
-          stdio: 'inherit',
-          env,
-        });
+        child = spawn(spawnCmd, spawnArgs, buildSupervisedWorkerSpawnOptions(env));
       } catch (err: unknown) {
         // Synchronous spawn error (e.g. invalid cliPath shape). Count as a crash.
         this.opts.onEvent({
