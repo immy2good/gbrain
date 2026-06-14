@@ -22,10 +22,19 @@ import {
   DEFAULT_REGRESSION_THRESHOLD,
 } from '../src/core/trajectory.ts';
 import type { TrajectoryPoint } from '../src/core/engine.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  // v0.41.5.0+: DEFAULT_EMBEDDING_DIMENSIONS is 1280. vecForMetric() inserts
+  // 1536-dim vectors — pin the gateway before initSchema so the column matches.
+  resetGateway();
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { OPENAI_API_KEY: 'sk-fake' },
+  });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -33,6 +42,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
