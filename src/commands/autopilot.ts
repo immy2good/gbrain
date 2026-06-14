@@ -1202,8 +1202,8 @@ function writeWindowsWrapperScript(repoPath: string): string {
 $ErrorActionPreference = 'Stop'
 $gbrain = '${safeGbrainPath}'
 # Supervisor owns the worker loop (wedge-restart watchdog); autopilot dispatches only.
-& $gbrain jobs supervisor start --detach --cli-path $gbrain | Out-Null
-& $gbrain autopilot --no-worker --repo '${safeRepoPath}'
+Start-Process -FilePath $gbrain -ArgumentList @('jobs','supervisor','start','--detach','--cli-path',$gbrain) -WindowStyle Hidden
+Start-Process -FilePath $gbrain -ArgumentList @('autopilot','--no-worker','--repo','${safeRepoPath}') -WindowStyle Hidden
 `;
   writeFileSync(wrapperPath, wrapper, 'utf8');
   return wrapperPath;

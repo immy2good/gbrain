@@ -15,7 +15,7 @@
  * any module mocking.
  */
 
-import { execFileSync } from 'child_process';
+import { execFileSync, type SpawnOptions } from 'child_process';
 
 /**
  * Resolve the tini binary path, or return an empty string when not on PATH.
@@ -53,4 +53,50 @@ export function buildSpawnInvocation(
   return tiniPath
     ? { cmd: tiniPath, args: ['--', cliPath, ...args] }
     : { cmd: cliPath, args };
+}
+
+/**
+ * Spawn options for supervised worker children (ChildWorkerSupervisor).
+ *
+ * On Windows, `stdio: 'inherit'` without `windowsHide` allocates a fresh console
+ * per spawn. That console closes immediately (nothing holds it open), the worker
+ * gets a console-close event, exits code 0, and the supervisor respawns in a
+ * ~1s loop — visible as CMD windows flashing every second (issue #1801 class).
+ *
+ * Non-Windows keeps inherited stdio so operators still see worker output in the
+ * foreground supervisor path.
+ */
+export function buildSupervisedWorkerSpawnOptions(
+  env: NodeJS.ProcessEnv,
+): SpawnOptions {
+  if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
+    return {
+      stdio: 'ignore',
+      env,
+      windowsHide: true,
+    };
+  }
+  return { stdio: 'inherit', env };
+}
+
+/**
+ * Spawn options for a detached background gbrain CLI re-exec (supervisor
+ * `--detach`, startup hooks, etc.). Hides the console on Windows.
+ */
+export function buildDetachedCliSpawnOptions(
+  env: NodeJS.ProcessEnv = process.env,
+): SpawnOptions {
+  if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
+    return {
+      detached: true,
+      stdio: 'ignore',
+      env,
+      windowsHide: true,
+    };
+  }
+  return {
+    detached: true,
+    stdio: ['ignore', 'ignore', 'inherit'],
+    env,
+  };
 }

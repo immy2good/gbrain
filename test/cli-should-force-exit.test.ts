@@ -83,19 +83,34 @@ describe('shouldForceExitAfterMain — daemon survival gate', () => {
     expect(shouldForceExitAfterMain(['serve-cluster'])).toBe(true);
   });
 
-  test('awaited long-runners exit deliberately when their handler resolves', () => {
-    // `jobs work`, `jobs watch --follow`, `autopilot`, and `gbrain watch`
-    // (#2095) all BLOCK inside their awaited handler until done — when
-    // main() resolves for them, the work is over and the deliberate exit is
-    // correct (v0.43 #2084 contract). Only commands that RETURN from main()
-    // while the event loop carries the daemon (`serve`) belong in
-    // DAEMON_COMMANDS — `watch` blocks in its stdin iteration, so piped EOF
-    // must flow through the flush-exit instead of hanging on lingering
-    // sockets.
-    expect(shouldForceExitAfterMain(['jobs', 'work'])).toBe(true);
-    expect(shouldForceExitAfterMain(['jobs', 'watch', '--follow'])).toBe(true);
-    expect(shouldForceExitAfterMain(['autopilot'])).toBe(true);
+  test('returns false for long-running jobs/autopilot daemons', () => {
+    // This fork runs `jobs work` as a persistent supervisor worker (WinSW
+    // LocalSystem on Windows), not a bounded job-drain — force-exiting it
+    // causes the CMD-flash + respawn loop bc4ef8ee fixes. So these BLOCK the
+    // central flushThenExit seam. Deliberate departure from upstream's #2084
+    // `jobs work` contract; the teardown machinery itself is unchanged (the
+    // only delta vs .53 is the isDaemonSubcommand predicate).
+    expect(shouldForceExitAfterMain(['jobs', 'work'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'start'])).toBe(false);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'start', '--detach'])).toBe(false);
+    expect(shouldForceExitAfterMain(['autopilot', '--no-worker', '--repo', '/tmp/brain'])).toBe(false);
+  });
+
+  test('returns true for one-shot jobs/autopilot commands', () => {
+    expect(shouldForceExitAfterMain(['jobs', 'list'])).toBe(true);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'status'])).toBe(true);
+    expect(shouldForceExitAfterMain(['jobs', 'supervisor', 'stop'])).toBe(true);
+    expect(shouldForceExitAfterMain(['autopilot', '--install'])).toBe(true);
+    expect(shouldForceExitAfterMain(['autopilot', '--uninstall'])).toBe(true);
+  });
+
+  test('watch commands force-exit through the flush seam (not daemonized)', () => {
+    // `watch` blocks in its stdin iteration, so piped EOF must flow through
+    // the flush-exit; it is NOT in the daemon predicate. `jobs watch` is a
+    // non-daemon jobs subcommand. All force-exit (true).
     expect(shouldForceExitAfterMain(['watch'])).toBe(true);
     expect(shouldForceExitAfterMain(['watch', '--json'])).toBe(true);
+    expect(shouldForceExitAfterMain(['jobs', 'watch', '--follow'])).toBe(true);
   });
 });
