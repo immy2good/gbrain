@@ -16,12 +16,12 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { hostname } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 import {
   tryAcquireDbLock,
   resolveStealGraceSeconds,
   DEFAULT_STEAL_GRACE_SECONDS,
 } from '../src/core/db-lock.ts';
-import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 
