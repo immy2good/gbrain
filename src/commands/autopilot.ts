@@ -106,42 +106,54 @@ function logError(phase: string, e: unknown) {
  *   3. argv[1] if it ends with /gbrain (e.g., direct invocation of compiled
  *      binary without PATH). Never .ts source paths.
  *   4. Throw with a clear install hint.
+ *
+ * Bun-compiled Windows binaries expose an internal `B:/~BUN/root/gbrain*.exe`
+ * path via process.execPath/argv[1]; that path is not a runnable CLI entry.
+ * PATH lookup (`where gbrain`) wins over those embedded paths.
  */
-export function resolveGbrainCliPath(): string {
+export function isEmbeddedBunCliPath(path: string): boolean {
+  return path.includes('~BUN') || /[/\\]~BUN[/\\]/i.test(path);
+}
+
+export function isGbrainExecutablePath(path: string): boolean {
+  if (!path || path.endsWith('.ts') || path.endsWith('.tsx')) return false;
+  if (isEmbeddedBunCliPath(path)) return false;
+  const base = path.split(/[/\\]/).pop() ?? '';
+  return path.endsWith('/gbrain')
+    || path.endsWith('\\gbrain.exe')
+    || /^gbrain(-[\w.]+)?\.exe$/i.test(base);
+}
+
+function resolveGbrainFromPathLookup(): string | null {
   try {
     const which = execSync('which gbrain', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (which) return which;
+    if (isGbrainExecutablePath(which)) return which;
   } catch { /* not on $PATH — fall through */ }
 
   if (process.platform === 'win32') {
     try {
-      const where = execSync('where gbrain', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+      const candidates = execSync('where gbrain', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .find(Boolean);
-      if (where) return where;
+        .filter(Boolean);
+      for (const candidate of candidates) {
+        if (isGbrainExecutablePath(candidate)) return candidate;
+      }
     } catch { /* not on %PATH% — fall through */ }
   }
 
+  return null;
+}
+
+export function resolveGbrainCliPath(): string {
+  const fromPath = resolveGbrainFromPathLookup();
+  if (fromPath) return fromPath;
+
   const exec = process.execPath ?? '';
-  const execBase = exec.split(/[/\\]/).pop() ?? '';
-  if (
-    exec.endsWith('/gbrain')
-    || exec.endsWith('\\gbrain.exe')
-    || /^gbrain(-[\w.]+)?\.exe$/i.test(execBase)
-  ) {
-    return exec;
-  }
+  if (isGbrainExecutablePath(exec)) return exec;
 
   const arg1 = process.argv[1] ?? '';
-  const arg1Base = arg1.split(/[/\\]/).pop() ?? '';
-  if (
-    arg1.endsWith('/gbrain')
-    || arg1.endsWith('\\gbrain.exe')
-    || /^gbrain(-[\w.]+)?\.exe$/i.test(arg1Base)
-  ) {
-    return arg1;
-  }
+  if (isGbrainExecutablePath(arg1)) return arg1;
 
   throw new Error('Could not resolve the gbrain CLI path. Install gbrain so it is on $PATH (e.g. /usr/local/bin/gbrain), or run autopilot from the compiled binary directly.');
 }
@@ -1190,7 +1202,7 @@ function writeWindowsWrapperScript(repoPath: string): string {
 $ErrorActionPreference = 'Stop'
 $gbrain = '${safeGbrainPath}'
 # Supervisor owns the worker loop (wedge-restart watchdog); autopilot dispatches only.
-& $gbrain jobs supervisor start --detach | Out-Null
+& $gbrain jobs supervisor start --detach --cli-path $gbrain | Out-Null
 & $gbrain autopilot --no-worker --repo '${safeRepoPath}'
 `;
   writeFileSync(wrapperPath, wrapper, 'utf8');

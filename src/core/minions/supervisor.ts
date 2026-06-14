@@ -45,6 +45,7 @@ import {
 import { dirname } from 'path';
 import type { BrainEngine } from '../engine.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../db-lock.ts';
+import { gbrainPath } from '../config.ts';
 import { currentBrainId } from './worker-registry.ts';
 
 export type SupervisorEvent =
@@ -132,16 +133,17 @@ export interface SupervisorOpts {
 export const DEFAULT_PID_FILE: string = (() => {
   const envOverride = process.env.GBRAIN_SUPERVISOR_PID_FILE;
   if (envOverride && envOverride.length > 0) return envOverride;
-  const home = process.env.HOME ?? '/tmp';
   // #1849: key the default pidfile on the brain id so two DIFFERENT brains
   // under one HOME don't share `supervisor.pid` and falsely block each other's
   // pidfile guard. Derived from config (no DB connect), so it's safe to
   // resolve at module load — `status`/`stop` need a cheap path before the
   // engine connects. The queue-scoped DB lock (supervisorLockId) is the real
   // singleton authority; this just removes the common-case footgun.
+  // Use gbrainPath() (os.homedir + GBRAIN_HOME) — not process.env.HOME, which
+  // is often unset on native Windows and previously fell back to /tmp.
   let brainId = 'default';
   try { brainId = currentBrainId(); } catch { /* fallback 'default' */ }
-  return `${home}/.gbrain/supervisor-${brainId}.pid`;
+  return gbrainPath(`supervisor-${brainId}.pid`);
 })();
 
 const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
