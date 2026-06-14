@@ -141,8 +141,10 @@ Each phase is idempotent. Re-running is safe. Common failure modes:
   for PGLite). Run `gbrain init --migrate-only` directly and look at
   the error.
 - **Phase F install fails:** your host environment doesn't match any
-  detected target. Pass `--target <macos|linux-systemd|ephemeral-container|linux-cron>`
-  explicitly.
+  detected target. Pass `--target <macos|linux-systemd|ephemeral-container|linux-cron|windows-schtasks>`
+  explicitly. On native Windows, `--install` registers a logon scheduled task
+  that starts `gbrain jobs supervisor --detach` then `gbrain autopilot --no-worker`
+  (supervisor owns the worker; autopilot dispatches cycles only).
 - **Pending host work never clears:** your host agent hasn't shipped
   handler registrations yet. Read
   `~/.gbrain/migrations/pending-host-work.jsonl`, open
