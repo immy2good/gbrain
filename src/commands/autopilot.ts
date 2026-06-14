@@ -112,13 +112,33 @@ export function resolveGbrainCliPath(): string {
     if (which) return which;
   } catch { /* not on $PATH — fall through */ }
 
+  if (process.platform === 'win32') {
+    try {
+      const where = execSync('where gbrain', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+      if (where) return where;
+    } catch { /* not on %PATH% — fall through */ }
+  }
+
   const exec = process.execPath ?? '';
-  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) {
+  const execBase = exec.split(/[/\\]/).pop() ?? '';
+  if (
+    exec.endsWith('/gbrain')
+    || exec.endsWith('\\gbrain.exe')
+    || /^gbrain(-[\w.]+)?\.exe$/i.test(execBase)
+  ) {
     return exec;
   }
 
   const arg1 = process.argv[1] ?? '';
-  if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) {
+  const arg1Base = arg1.split(/[/\\]/).pop() ?? '';
+  if (
+    arg1.endsWith('/gbrain')
+    || arg1.endsWith('\\gbrain.exe')
+    || /^gbrain(-[\w.]+)?\.exe$/i.test(arg1Base)
+  ) {
     return arg1;
   }
 
