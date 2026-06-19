@@ -58,4 +58,11 @@ describe('code-callers — short-name recall of qualified edges', () => {
     const callers = await engine.getCallersOf('Widget::compute', { allSources: true });
     expect(callers.some(c => c.from_symbol_qualified.includes('render'))).toBe(true);
   });
+
+  // The last-segment recall only affects edges with a QUALIFIED to_symbol. In
+  // this pipeline that is exclusively receiver-resolved CALL edges: `imports`
+  // edges are qualified but never persist (top-level import statements fall
+  // outside every semantic chunk, so findChunkForOffset drops them), and
+  // `references` edges carry a BARE type name. So the recall widening is inert
+  // for non-call edges — no edge_type scoping needed.
 });
