@@ -6,7 +6,7 @@ import type { BrainEngine, FileSpec } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
-import { findChunkForOffset } from './chunkers/edge-extractor.ts';
+import { findChunkForOffset, fileIdentity } from './chunkers/edge-extractor.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedBatch, embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
@@ -1228,7 +1228,25 @@ export async function importCodeFile(
       });
 
       const edgeInputs: import('./types.ts').CodeEdgeInput[] = [];
+      // File-level edges (#include) are keyed file→file: `from` is THIS file's
+      // identity, not the symbol at the directive's offset. Anchor them to the
+      // file's first real chunk purely for the NOT-NULL FK. A file that
+      // produced no chunk (header-only) can't anchor — skipped (v1 ceiling).
+      const firstChunk = rangeList.find(r => typeof r.id === 'number');
+      const fileSym = fileIdentity(relativePath);
       for (const e of extractedEdges) {
+        if (e.fileLevel) {
+          if (!firstChunk?.id || !fileSym) continue;
+          edgeInputs.push({
+            from_chunk_id: firstChunk.id,
+            to_chunk_id: null,
+            from_symbol_qualified: fileSym,
+            to_symbol_qualified: e.toSymbol,
+            edge_type: e.edgeType,
+            source_id: edgeSourceId,
+          });
+          continue;
+        }
         const idx = findChunkForOffset(e.callSiteByteOffset, content, rangeList);
         if (idx == null) continue;
         const from = rangeList[idx]!;
