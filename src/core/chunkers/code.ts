@@ -668,6 +668,19 @@ export async function chunkCodeTextFull(
         ? normalizeSymbolType(typeNode.namedChild(0).type)
         : normalizeSymbolType(typeNode.type);
 
+      // C/C++/MQL out-of-line member definitions (`void CFoo::Bar(){...}`) parse
+      // as top-level function_definitions whose declarator is a
+      // qualified_identifier (scope::name). Scope them to their class so the
+      // def's qualified name matches the inline form (CFoo.Bar) AND the chunk
+      // carries parent-scope metadata (so mergeSmallSiblings won't roll it into
+      // an anonymous merged chunk, which would drop its call edges).
+      let emitName = symbolName;
+      let emitParentPath: string[] = [];
+      if ((language === 'cpp' || language === 'mql') && node.type === 'function_definition') {
+        const ool = extractCppQualifiedDefScope(node);
+        if (ool) { emitName = ool.name; emitParentPath = [ool.scope]; }
+      }
+
       if (nestableNode && symbolName && nestedConfig) {
         const before = chunks.length;
         emitNestedScoped(nestableNode, [], source, filePath, language, nestedConfig, chunks);
@@ -676,11 +689,11 @@ export async function chunkCodeTextFull(
 
       if (estimateTokens(nodeText) <= largeThreshold) {
         chunks.push(buildChunk({
-          body: nodeText, filePath, language, symbolName, symbolType,
+          body: nodeText, filePath, language, symbolName: emitName, symbolType,
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
           index: chunks.length,
-          parentSymbolPath: [],
+          parentSymbolPath: emitParentPath,
         }));
         continue;
       }
@@ -689,11 +702,11 @@ export async function chunkCodeTextFull(
       const subRanges = splitLargeNode(node, source, chunkTarget);
       if (subRanges.length === 0) {
         chunks.push(buildChunk({
-          body: nodeText, filePath, language, symbolName, symbolType,
+          body: nodeText, filePath, language, symbolName: emitName, symbolType,
           startLine: node.startPosition.row + 1,
           endLine: node.endPosition.row + 1,
           index: chunks.length,
-          parentSymbolPath: [],
+          parentSymbolPath: emitParentPath,
         }));
         continue;
       }
@@ -702,10 +715,10 @@ export async function chunkCodeTextFull(
         const body = source.slice(range.startIndex, range.endIndex).trim();
         if (!body) continue;
         chunks.push(buildChunk({
-          body, filePath, language, symbolName, symbolType,
+          body, filePath, language, symbolName: emitName, symbolType,
           startLine: range.startLine, endLine: range.endLine,
           index: chunks.length,
-          parentSymbolPath: [],
+          parentSymbolPath: emitParentPath,
         }));
       }
     }
@@ -1063,6 +1076,30 @@ function splitLargeNode(node: any, source: string, chunkTarget: number): SplitRa
   }
   ranges.push({ startIndex: curStart, endIndex: curEnd, startLine: curStartLine, endLine: curEndLine });
   return ranges;
+}
+
+/**
+ * C/C++/MQL out-of-line member definition scope. For a `function_definition`
+ * whose declarator chain reaches a `qualified_identifier` (`CFoo::Bar`),
+ * returns `{ scope: 'CFoo', name: 'Bar' }`. Returns null for ordinary
+ * (non-scoped) definitions. Verified against tree-sitter-cpp:
+ * function_definition.declarator → function_declarator.declarator →
+ * qualified_identifier{scope, name}.
+ */
+function extractCppQualifiedDefScope(funcDef: any): { scope: string; name: string } | null {
+  let cur = funcDef.childForFieldName?.('declarator');
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.type === 'qualified_identifier') {
+      const scope = cur.childForFieldName('scope')?.text;
+      const name = cur.childForFieldName('name')?.text;
+      if (!scope || !name) return null;
+      const s = sanitize(scope);
+      const n = sanitize(name);
+      return s && n ? { scope: s, name: n } : null;
+    }
+    cur = cur.childForFieldName?.('declarator');
+  }
+  return null;
 }
 
 function extractSymbolName(node: any): string | null {

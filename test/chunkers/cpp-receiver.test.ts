@@ -63,14 +63,12 @@ public:
     expect(callees).not.toContain('CGamma.Scale');
   });
 
-  // Regression guard for the no-false-edge promise on the shape most likely to
-  // break it: an OUT-OF-LINE method definition (`void CFoo::Bar(){...}` outside
-  // the class body). A bare sibling call there has no ENCLOSING class_specifier
-  // to walk up to — the walk reaches translation_unit and stops — so it stays
-  // bare rather than being misattributed. (Resolving out-of-line defs via the
-  // qualified_identifier declarator scope is a deferred follow-up; the hard
-  // guarantee is that it never produces a false edge.)
-  test('an out-of-line method definition keeps sibling calls bare', async () => {
+  // An OUT-OF-LINE method definition (`void CFoo::Bar(){...}` outside the class
+  // body) has no ENCLOSING class_specifier for the call site to walk up to — the
+  // walk reaches translation_unit. We recover the class from the definition's
+  // `qualified_identifier` scope (`CFoo::Bar` → `CFoo`) and apply the same
+  // exactly-one-declaration rule, so a bare sibling call resolves to `CFoo.Baz`.
+  test('an out-of-line method definition resolves sibling calls to the class', async () => {
     const OUT_OF_LINE_HPP = `class CFoo {
 public:
   void Bar();
@@ -88,7 +86,72 @@ void CFoo::Baz() {
       chunkSizeTokens: 50,
     });
     const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
-    expect(callees).toContain('Baz');
-    expect(callees).not.toContain('CFoo.Baz');
+    // The class is declared in-file: exactly one declaration of `Baz` (the
+    // prototype) → the out-of-line sibling call qualifies to `CFoo.Baz`.
+    expect(callees).toContain('CFoo.Baz');
+    expect(callees).not.toContain('Baz');
+  });
+
+  test('an overloaded sibling stays bare in an out-of-line definition', async () => {
+    const OUT_OF_LINE_OVERLOAD_HPP = `class CFoo {
+public:
+  void Run();
+  double Scale(double x);
+  double Scale(double x, double y);
+};
+
+void CFoo::Run() {
+  Scale(1.0);
+}
+
+double CFoo::Scale(double x) { return x; }
+double CFoo::Scale(double x, double y) { return x + y; }
+`;
+    const { edges } = await chunkCodeTextFull(OUT_OF_LINE_OVERLOAD_HPP, 'src/foo.hpp', {
+      chunkSizeTokens: 50,
+    });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    // Two declarations of `Scale` in the class body → ambiguous → stay bare.
+    expect(callees).toContain('Scale');
+    expect(callees).not.toContain('CFoo.Scale');
+  });
+
+  test('a library call in an out-of-line definition stays bare', async () => {
+    const OUT_OF_LINE_LIB_HPP = `class CFoo {
+public:
+  void Tick();
+};
+
+void CFoo::Tick() {
+  TimeCurrent();
+}
+`;
+    const { edges } = await chunkCodeTextFull(OUT_OF_LINE_LIB_HPP, 'src/foo.hpp', {
+      chunkSizeTokens: 50,
+    });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    // `TimeCurrent` has no declaration in the class → not a sibling → stays bare.
+    expect(callees).toContain('TimeCurrent');
+    expect(callees).not.toContain('CFoo.TimeCurrent');
+  });
+
+  // When the class is declared in ANOTHER file (the .cpp-implements-a-.h shape),
+  // there is no class_specifier in this translation unit. Fall back to counting
+  // out-of-line definitions with the same scope; exactly one → resolve.
+  test('out-of-line defs resolve via scope when the class is declared elsewhere', async () => {
+    const IMPL_ONLY_CPP = `void CExternal::DoWork() {
+  Helper();
+}
+
+void CExternal::Helper() {
+}
+`;
+    const { edges } = await chunkCodeTextFull(IMPL_ONLY_CPP, 'src/external.cpp', {
+      chunkSizeTokens: 50,
+    });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    // One out-of-line definition of `Helper` with scope `CExternal` → resolve.
+    expect(callees).toContain('CExternal.Helper');
+    expect(callees).not.toContain('Helper');
   });
 });

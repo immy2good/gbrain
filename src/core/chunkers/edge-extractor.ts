@@ -202,31 +202,91 @@ function cppMethodName(funcDef: any): string | null {
 }
 
 /**
- * Count inline sibling methods of a `class_specifier` / `struct_specifier`
- * whose name equals `name`. Scans the class body's `function_definition`
- * children — the exact node set code.ts emits as method def chunks, so a
- * count of 1 means precisely one matching def exists to key the edge on.
+ * Out-of-line member-definition scope. For a top-level `function_definition`
+ * whose declarator chain reaches a `qualified_identifier` (`CFoo::Bar`),
+ * returns `{ scope: 'CFoo', name: 'Bar' }`; null for ordinary definitions.
  */
-function countCppSiblingMethods(classNode: any, name: string): number {
+function cppQualifiedDefScope(funcDef: any): { scope: string; name: string } | null {
+  let cur = funcDef.childForFieldName?.('declarator');
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.type === 'qualified_identifier') {
+      const scope = cur.childForFieldName('scope')?.text as string | undefined;
+      const name = cur.childForFieldName('name')?.text as string | undefined;
+      if (!scope || !name) return null;
+      const s = sanitizeIdent(scope);
+      const n = sanitizeIdent(name);
+      return s && n ? { scope: s, name: n } : null;
+    }
+    cur = cur.childForFieldName?.('declarator');
+  }
+  return null;
+}
+
+/**
+ * Count the methods named `name` declared by a `class_specifier` /
+ * `struct_specifier` body: inline `function_definition`s AND method prototypes
+ * (`field_declaration` whose declarator is a `function_declarator`). This is
+ * the canonical overload count — out-of-line definitions are implementations of
+ * these declarations, not additional methods, so they are NOT counted here
+ * (counting both would double-count and look like a false overload).
+ */
+function countCppClassBodyMethods(classNode: any, name: string): number {
   const body = classNode.childForFieldName?.('body');
   if (!body) return 0;
   let count = 0;
   for (const child of body.namedChildren ?? []) {
-    if (child.type === 'function_definition' && cppMethodName(child) === name) count++;
+    if (child.type === 'function_definition') {
+      if (cppMethodName(child) === name) count++;
+    } else if (child.type === 'field_declaration') {
+      // Only method prototypes (declarator is a function_declarator), not data
+      // members.
+      const d = child.childForFieldName?.('declarator');
+      if (d?.type === 'function_declarator' && cppMethodName(child) === name) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Count the methods named `methodName` belonging to class `className` across a
+ * whole translation unit. Prefers the in-file `class_specifier` body (the
+ * canonical declaration site); when the class is declared in another file (the
+ * impl-only `.cpp` shape), falls back to counting out-of-line definitions whose
+ * `qualified_identifier` scope matches.
+ */
+function countCppClassMethodsInFile(root: any, className: string, methodName: string): number {
+  for (const child of root.namedChildren ?? []) {
+    if (
+      (child.type === 'class_specifier' || child.type === 'struct_specifier') &&
+      (child.childForFieldName('name')?.text as string | undefined) === className
+    ) {
+      return countCppClassBodyMethods(child, methodName);
+    }
+  }
+  let count = 0;
+  for (const child of root.namedChildren ?? []) {
+    if (child.type === 'function_definition') {
+      const ool = cppQualifiedDefScope(child);
+      if (ool && ool.scope === className && ool.name === methodName) count++;
+    }
   }
   return count;
 }
 
 /**
  * C/C++/MQL receiver resolution. Resolves an IMPLICIT-receiver call — a bare
- * `m()` (the MQL idiom) or `this->m()` — to the enclosing class when exactly
- * one inline sibling method is named `m`, yielding `C.m` (dotted, matching the
- * def's qualified name so getCallersOf/getCalleesOf align).
+ * `m()` (the MQL idiom) or `this->m()` — to its class as `C.m` (dotted, matching
+ * the def's qualified name so getCallersOf/getCalleesOf align). Handles two
+ * enclosing shapes:
+ *   - INLINE: the call sits inside a method defined in the class body → walk up
+ *     to the enclosing `class_specifier`.
+ *   - OUT-OF-LINE: the call sits inside `C::m(){...}` at top level → the class
+ *     is named by the definition's `qualified_identifier` scope.
  *
- * The honest precision boundary:
- *   - exactly 1 sibling named `m`  → `C.m` (confident, no conflation)
- *   - 0 siblings (global/library call like `MathAbs`) → null → stay bare
- *   - >1 (overload)                → null → stay bare (no confident false edge)
+ * The honest precision boundary is identical for both:
+ *   - exactly 1 declaration of `m` in the class → `C.m`
+ *   - 0 (global/library call like `MathAbs`)     → null → stay bare
+ *   - >1 (overload)                              → null → stay bare (no false edge)
  *
  * Explicit object receivers (`obj.m()`, `m_field.m()`) need member-field type
  * resolution and are a later increment — they return null here.
@@ -252,19 +312,35 @@ function resolveCppReceiver(
   }
   if (!implicitSelf) return null;
 
-  // Walk up to the enclosing class/struct, then apply the sibling-count rule.
+  const qualify = (className: string): string =>
+    buildQualifiedName({
+      language,
+      symbolName: bareCallee,
+      symbolType: 'method',
+      parentSymbolPath: [className],
+    })!;
+
+  // Walk up looking for the enclosing class (inline) or out-of-line definition.
   let node = callNode.parent;
   for (let i = 0; i < WALK_DEPTH_CAP && node; i++) {
     if (node.type === 'class_specifier' || node.type === 'struct_specifier') {
       const className = node.childForFieldName('name')?.text as string | undefined;
       if (!className) return null;
-      if (countCppSiblingMethods(node, bareCallee) !== 1) return null;
-      return buildQualifiedName({
-        language,
-        symbolName: bareCallee,
-        symbolType: 'method',
-        parentSymbolPath: [className],
-      });
+      return countCppClassBodyMethods(node, bareCallee) === 1 ? qualify(className) : null;
+    }
+    if (node.type === 'function_definition') {
+      // An out-of-line definition (`C::m(){...}`) names its class via the
+      // declarator's qualified_identifier scope. An inline method def has a
+      // plain field_identifier declarator (scope null) → keep walking up to its
+      // enclosing class_specifier.
+      const ool = cppQualifiedDefScope(node);
+      if (ool) {
+        let root = node;
+        while (root.parent) root = root.parent;
+        return countCppClassMethodsInFile(root, ool.scope, bareCallee) === 1
+          ? qualify(ool.scope)
+          : null;
+      }
     }
     node = node.parent;
   }
