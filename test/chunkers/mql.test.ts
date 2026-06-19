@@ -104,3 +104,19 @@ describe('MQL — call edges', () => {
     expect(callees).not.toContain('CPipCalculator.MathAbs');
   });
 });
+
+describe('MQL — #include graph extraction', () => {
+  test('emits a file-level imports edge per include (quoted AND angle), keyed on basename', async () => {
+    const SRC = `#include "Utils/PipCalculator.mqh"
+#include <Trade/Trade.mqh>
+
+class CFoo { public: void Run(){} };
+`;
+    const { edges } = await chunkCodeTextFull(SRC, 'Experts/Foo.mq5', { chunkSizeTokens: 50 });
+    const includes = edges.filter(e => e.edgeType === 'imports' && e.fileLevel);
+    const targets = includes.map(e => e.toSymbol);
+    // Identity is the basename without extension — quoted local + angle system.
+    expect(targets).toContain('PipCalculator');
+    expect(targets).toContain('Trade');
+  });
+});

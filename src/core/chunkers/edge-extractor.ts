@@ -65,6 +65,27 @@ export interface ExtractedEdge {
    * references (Python's type hints are too sparse to be useful for v0.34).
    */
   edgeType: 'calls' | 'imports' | 'references';
+  /**
+   * v0.42 MQL slice — FILE-LEVEL edge (a C/C++/MQL `#include`). Unlike call
+   * edges, a file-level edge's `from` is the FILE's identity (basename), not the
+   * symbol at the call-site offset — so the importer anchors it to the file's
+   * first chunk (for the FK) and sets `from_symbol_qualified` to the file
+   * identity instead of the chunk's symbol. Absent/false for ordinary edges.
+   */
+  fileLevel?: boolean;
+}
+
+/**
+ * Normalized file identity for the #include graph: basename without extension,
+ * case preserved. `#include "Worker.mqh"` and the file `Include/Worker.mqh`
+ * both resolve to `Worker`, so include edges chain (the `to` of one file's edge
+ * equals the `from` of the included file's own edges). v1 ceiling: bare
+ * basename, so two same-named files in different directories collide.
+ */
+export function fileIdentity(pathOrIncludeRef: string): string {
+  const noWrap = pathOrIncludeRef.replace(/^\s*["'<]|[">']\s*$/g, '').trim();
+  const base = noWrap.split(/[/\\]/).pop() ?? noWrap;
+  return base.replace(/\.[^.]+$/, '');
 }
 
 /**
@@ -800,15 +821,43 @@ export function extractReferenceEdges(tree: any, language: SupportedCodeLanguage
 }
 
 /**
+ * v0.42 MQL slice — #include graph. Walk top-level `preproc_include` directives
+ * (C/C++/MQL) and emit one FILE-LEVEL `imports` edge per include, keyed on the
+ * included file's identity (basename, no extension). The importer sets the
+ * edge's `from` to the INCLUDING file's identity, so the graph is file→file:
+ *   getCallersOf(X) → "what includes X"   getCalleesOf(F) → "what F includes"
+ * and getCalleesOf chains for the transitive build-closure.
+ *
+ * Both `#include "local.mqh"` (string_literal) and `#include <sys.mqh>`
+ * (system_lib_string) are captured — both are real dependencies.
+ */
+export function extractIncludeEdges(tree: any, language: SupportedCodeLanguage): ExtractedEdge[] {
+  const out: ExtractedEdge[] = [];
+  if (language !== 'cpp' && language !== 'mql' && language !== 'c') return out;
+  const root = tree.rootNode;
+  if (!root) return out;
+  for (const node of root.namedChildren ?? []) {
+    if (node.type !== 'preproc_include') continue;
+    const pathNode = node.childForFieldName('path');
+    const raw = (pathNode?.text ?? '') as string;
+    const id = fileIdentity(raw);
+    if (!id) continue;
+    out.push({ callSiteByteOffset: node.startIndex, toSymbol: id, edgeType: 'imports', fileLevel: true });
+  }
+  return out;
+}
+
+/**
  * v0.34 W2 — Combined extractor: returns the union of call edges, import
- * edges, and reference edges. Consumers (code.ts) call this instead of
- * extractCallEdges directly.
+ * edges, reference edges, and (C/C++/MQL) #include edges. Consumers (code.ts)
+ * call this instead of extractCallEdges directly.
  */
 export function extractAllEdges(tree: any, language: SupportedCodeLanguage): ExtractedEdge[] {
   return [
     ...extractCallEdges(tree, language),
     ...extractImportEdges(tree, language),
     ...extractReferenceEdges(tree, language),
+    ...extractIncludeEdges(tree, language),
   ];
 }
 
