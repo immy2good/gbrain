@@ -95,6 +95,7 @@ const RECEIVER_RESOLUTION_LANGS: ReadonlySet<SupportedCodeLanguage> = new Set([
   // IMPLICIT receiver of an intra-class call to the enclosing class. See
   // resolveCppReceiver.
   'cpp',
+  'mql',
 ] as const);
 
 /**

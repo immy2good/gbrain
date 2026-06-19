@@ -52,22 +52,20 @@ afterAll(async () => {
 }, 30_000);
 
 describe('MQL — code-callers / code-callees end-to-end', () => {
-  test('CalculatePips is a caller of PriceToPips', async () => {
+  // Receiver-type resolution qualifies the implicit-this call
+  // `PriceToPips(...)` inside CalculatePips to its enclosing class, so the edge
+  // keys on `CPipCalculator.PriceToPips`. A BARE query still recalls it
+  // (getCallersOf/getCalleesOf last-segment match), so short-name lookups keep
+  // working while the qualified form is precise.
+  test('CalculatePips is a caller of PriceToPips (bare query still recalls)', async () => {
     const callers = await engine.getCallersOf('PriceToPips', { allSources: true });
     const hit = callers.find(r => r.from_symbol_qualified.includes('CalculatePips'));
     expect(hit).toBeDefined();
     expect(hit!.edge_type).toBe('calls');
   });
 
-  // Query semantics: getCallersOf/getCalleesOf match the edge's qualified name
-  // EXACTLY. The implicit call `PriceToPips(...)` emits a bare-token edge
-  // (to = 'PriceToPips'), while the caller chunk carries its qualified name
-  // (from = 'CPipCalculator.CalculatePips'). So callers resolve by the short
-  // callee name and callees by the qualified caller name. Precise receiver-type
-  // resolution (so both directions key on the fully-qualified symbol, and
-  // overloaded/virtual dispatch is marked) is the next slice.
-  test('PriceToPips is a callee of CalculatePips (qualified caller)', async () => {
+  test('PriceToPips is a callee of CalculatePips, keyed on the qualified callee', async () => {
     const callees = await engine.getCalleesOf('CPipCalculator.CalculatePips', { allSources: true });
-    expect(callees.some(r => r.to_symbol_qualified === 'PriceToPips')).toBe(true);
+    expect(callees.some(r => r.to_symbol_qualified === 'CPipCalculator.PriceToPips')).toBe(true);
   });
 });

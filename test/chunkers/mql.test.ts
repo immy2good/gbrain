@@ -86,15 +86,21 @@ describe('MQL — class method definitions', () => {
 });
 
 describe('MQL — call edges', () => {
-  test('harvests intra-class method call sites', async () => {
+  test('resolves implicit-this calls to the class; globals stay bare', async () => {
     const { edges } = await chunkCodeTextFull(
       PIP_CALCULATOR_MQH,
       'Include/AIMS/Utils/PipCalculator.mqh',
       { chunkSizeTokens: 50 },
     );
     const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
-    // CalculatePips() calls PriceToPips(); the constructor calls CalculatePointSize().
-    expect(callees).toContain('PriceToPips');
-    expect(callees).toContain('CalculatePointSize');
+    // CalculatePips() calls PriceToPips(); the constructor calls
+    // CalculatePointSize() — both are sibling methods, so they resolve to the
+    // enclosing class.
+    expect(callees).toContain('CPipCalculator.PriceToPips');
+    expect(callees).toContain('CPipCalculator.CalculatePointSize');
+    // MathAbs / MarketInfo / Symbol are MQL built-ins, not sibling methods —
+    // they stay bare (no false `CPipCalculator.MathAbs` edge).
+    expect(callees).toContain('MathAbs');
+    expect(callees).not.toContain('CPipCalculator.MathAbs');
   });
 });
