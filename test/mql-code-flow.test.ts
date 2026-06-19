@@ -39,7 +39,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
-  await importCodeFile(engine, 'Include/AIMS/Chain.mqh', CHAIN_MQH, { noEmbed: true });
+  await importCodeFile(engine, 'Include/Chain.mqh', CHAIN_MQH, { noEmbed: true });
 }, 60_000);
 
 afterAll(async () => {

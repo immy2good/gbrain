@@ -1,17 +1,17 @@
 /**
  * MQL code-intelligence — end-to-end code-callers / code-callees.
  *
- * Imports a real-derived MQL class into PGLite and asserts the intra-class
- * call edge (CalculatePips -> PriceToPips) is queryable via getCallersOf /
- * getCalleesOf. This is the slice-1 tracer bullet: a call edge usable
- * end-to-end for MQL through importCodeFile, not just harvested by the chunker.
+ * Imports a small MQL class into PGLite and asserts the intra-class call edge
+ * (CalculatePips -> PriceToPips) is queryable via getCallersOf / getCalleesOf.
+ * This is the slice-1 tracer bullet: a call edge usable end-to-end for MQL
+ * through importCodeFile, not just harvested by the chunker.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importCodeFile } from '../src/core/import-file.ts';
 
-// Derived from itradeaims-indicators mt4/Include/AIMS/Utils/PipCalculator.mqh.
+// A representative MQL utility class with inline methods.
 const PIP_CALCULATOR_MQH = `#property strict
 
 class CPipCalculator
@@ -41,7 +41,7 @@ beforeAll(async () => {
   await engine.initSchema();
   await importCodeFile(
     engine,
-    'Include/AIMS/Utils/PipCalculator.mqh',
+    'Include/Utils/PipCalculator.mqh',
     PIP_CALCULATOR_MQH,
     { noEmbed: true },
   );

@@ -47,8 +47,8 @@ beforeAll(async () => {
   await engine.connect({});
   await engine.initSchema();
   await runSources(engine, ['add', SRC, '--no-federated']);
-  await importCodeFile(engine, 'Include/AIMS/Worker.mqh', WORKER_MQH, { noEmbed: true, sourceId: SRC });
-  await importCodeFile(engine, 'Include/AIMS/Holder.mqh', HOLDER_MQH, { noEmbed: true, sourceId: SRC });
+  await importCodeFile(engine, 'Include/Worker.mqh', WORKER_MQH, { noEmbed: true, sourceId: SRC });
+  await importCodeFile(engine, 'Include/Holder.mqh', HOLDER_MQH, { noEmbed: true, sourceId: SRC });
 }, 60_000);
 
 afterAll(async () => {

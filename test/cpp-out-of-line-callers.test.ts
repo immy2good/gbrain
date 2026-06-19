@@ -16,9 +16,9 @@
  *   - an overloaded callee (>1 declaration) → stay bare (no confident false edge)
  *   - a genuine library/global call (0 declarations) → stay bare
  *
- * Fixture is real-derived: it mirrors AIMSStatisticsEngine.mqh — prototypes in
- * the class body, bodies defined out-of-line, `Update()` calling the sibling
- * `UpdateCachedStatistics()` and a library `TimeCurrent()`.
+ * Fixture mirrors the common out-of-line MQL idiom — prototypes in the class
+ * body, bodies defined out-of-line, `Update()` calling the sibling
+ * `UpdateCache()` and a library `TimeCurrent()`.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
@@ -72,7 +72,7 @@ beforeAll(async () => {
   await engine.initSchema();
   await importCodeFile(
     engine,
-    'Include/AIMS/Stats.mqh',
+    'Include/Stats.mqh',
     OUT_OF_LINE_MQH,
     { noEmbed: true },
   );

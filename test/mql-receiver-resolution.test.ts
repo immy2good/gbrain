@@ -21,8 +21,8 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importCodeFile } from '../src/core/import-file.ts';
 
-// Two real-shaped MQL classes with a colliding method name. Derived from the
-// AIMS indicator idiom: inline class methods calling siblings without `this.`.
+// Two real-shaped MQL classes with a colliding method name, in the common MQL
+// idiom: inline class methods calling siblings without `this.`.
 const TWO_CLASSES_MQH = `#property strict
 
 class CAlpha
@@ -62,7 +62,7 @@ beforeAll(async () => {
   await engine.initSchema();
   await importCodeFile(
     engine,
-    'Include/AIMS/TwoClasses.mqh',
+    'Include/TwoClasses.mqh',
     TWO_CLASSES_MQH,
     { noEmbed: true },
   );

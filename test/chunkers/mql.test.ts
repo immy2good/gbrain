@@ -3,17 +3,17 @@
  *
  * MQL is a C/C++ subset; gbrain parses it with the shipped tree-sitter-cpp
  * grammar under a distinct `mql` language tag (so UX, filters, and qualified
- * symbol identity are isolated from C++). These fixtures are derived from real
- * iTradeAIMS indicator source (CPipCalculator) and are deliberately free of
- * the MQL `input`/`sinput` keywords, which need a pre-parse shim (later slice).
+ * symbol identity are isolated from C++). These fixtures are small,
+ * self-contained MQL classes and are deliberately free of the MQL
+ * `input`/`sinput` keywords, which need a pre-parse shim (later slice).
  */
 
 import { describe, test, expect } from 'bun:test';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage } from '../../src/core/chunkers/code.ts';
 
-// Derived from itradeaims-indicators mt4/Include/AIMS/Utils/PipCalculator.mqh.
-// Inline class methods + an implicit-`this` method call (CalculatePips ->
-// PriceToPips) — the call-graph tracer the edge slice depends on.
+// A representative MQL utility class: inline class methods + an implicit-`this`
+// method call (CalculatePips -> PriceToPips) — the call-graph tracer the edge
+// slice depends on.
 const PIP_CALCULATOR_MQH = `#property strict
 
 class CPipCalculator
@@ -56,7 +56,7 @@ describe('MQL — detectCodeLanguage', () => {
   test('maps .mq4 / .mq5 / .mqh to the mql language tag', () => {
     expect(detectCodeLanguage('Indicator.mq4')).toBe('mql');
     expect(detectCodeLanguage('Expert.mq5')).toBe('mql');
-    expect(detectCodeLanguage('Include/AIMS/Utils/PipCalculator.mqh')).toBe('mql');
+    expect(detectCodeLanguage('Include/Utils/PipCalculator.mqh')).toBe('mql');
   });
 
   test('is case-insensitive for MQL extensions', () => {
@@ -68,7 +68,7 @@ describe('MQL — class method definitions', () => {
   test('emits each class method as its own chunk scoped to the class', async () => {
     const chunks = await chunkCodeText(
       PIP_CALCULATOR_MQH,
-      'Include/AIMS/Utils/PipCalculator.mqh',
+      'Include/Utils/PipCalculator.mqh',
       { chunkSizeTokens: 50 },
     );
 
@@ -89,7 +89,7 @@ describe('MQL — call edges', () => {
   test('resolves implicit-this calls to the class; globals stay bare', async () => {
     const { edges } = await chunkCodeTextFull(
       PIP_CALCULATOR_MQH,
-      'Include/AIMS/Utils/PipCalculator.mqh',
+      'Include/Utils/PipCalculator.mqh',
       { chunkSizeTokens: 50 },
     );
     const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
