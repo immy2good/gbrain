@@ -61,6 +61,11 @@ const CODE_EXTENSIONS = new Set<string>([
   '.cs',
   '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh',
   '.c', '.h',
+  // MQL4 / MQL5 (MetaTrader) — a C/C++ subset the chunker parses via
+  // tree-sitter-cpp under the `mql` tag. Without these, `gbrain sync
+  // --strategy code` dropped every MQL file, leaving the MQL code-intel
+  // layer unreachable through normal ingestion.
+  '.mq4', '.mq5', '.mqh',
   '.php',
   '.swift',
   '.kt', '.kts',

@@ -48,6 +48,17 @@ describe('Layer 2 — isCodeFilePath widening', () => {
     expect(isCodeFilePath('src/main.h')).toBe(true);
   });
 
+  test('MQL (.mq4/.mq5/.mqh) classified as code so sync discovers it', () => {
+    // The chunker's detectCodeLanguage maps these to `mql`, but the sync
+    // classifier dropped them — so `gbrain sync --strategy code` never fed
+    // an MQL repo to the chunker. Without this the entire MQL code-intel
+    // layer is unreachable through the normal ingestion path.
+    expect(isCodeFilePath('Indicators/Foo.mq4')).toBe(true);
+    expect(isCodeFilePath('Experts/Bar.mq5')).toBe(true);
+    expect(isCodeFilePath('Include/Lib.mqh')).toBe(true);
+    expect(isCodeFilePath('FOO.MQH')).toBe(true); // case-insensitive
+  });
+
   test('Swift / Kotlin / Scala / PHP now classified as code', () => {
     expect(isCodeFilePath('ios/App.swift')).toBe(true);
     expect(isCodeFilePath('android/Main.kt')).toBe(true);
