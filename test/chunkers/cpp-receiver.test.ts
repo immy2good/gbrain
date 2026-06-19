@@ -62,4 +62,33 @@ public:
     expect(callees).toContain('Scale');
     expect(callees).not.toContain('CGamma.Scale');
   });
+
+  // Regression guard for the no-false-edge promise on the shape most likely to
+  // break it: an OUT-OF-LINE method definition (`void CFoo::Bar(){...}` outside
+  // the class body). A bare sibling call there has no ENCLOSING class_specifier
+  // to walk up to — the walk reaches translation_unit and stops — so it stays
+  // bare rather than being misattributed. (Resolving out-of-line defs via the
+  // qualified_identifier declarator scope is a deferred follow-up; the hard
+  // guarantee is that it never produces a false edge.)
+  test('an out-of-line method definition keeps sibling calls bare', async () => {
+    const OUT_OF_LINE_HPP = `class CFoo {
+public:
+  void Bar();
+  void Baz();
+};
+
+void CFoo::Bar() {
+  Baz();
+}
+
+void CFoo::Baz() {
+}
+`;
+    const { edges } = await chunkCodeTextFull(OUT_OF_LINE_HPP, 'src/foo.hpp', {
+      chunkSizeTokens: 50,
+    });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    expect(callees).toContain('Baz');
+    expect(callees).not.toContain('CFoo.Baz');
+  });
 });
