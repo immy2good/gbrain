@@ -155,3 +155,76 @@ void CExternal::Helper() {
     expect(callees).not.toContain('Helper');
   });
 });
+
+describe('C++ — member-field / object receiver resolution', () => {
+  // `m_x.Method()` and `obj.Method()` resolve to the RECEIVER's declared type,
+  // not the enclosing class. The type is explicit (`CWorker m_worker;`), so the
+  // class attribution is certain — no sibling-count guesswork. This is the
+  // dominant call shape in real MQL (member objects + accessor methods).
+  test('a member-field call resolves to the field type, not the enclosing class', async () => {
+    const HPP = `class CHolder {
+private:
+  CWorker m_worker;
+  int     m_count;
+public:
+  void Run() {
+    m_worker.DoWork();
+    m_count = m_count + 1;
+  }
+};
+`;
+    const { edges } = await chunkCodeTextFull(HPP, 'src/holder.hpp', { chunkSizeTokens: 50 });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    expect(callees).toContain('CWorker.DoWork');
+    // NOT attributed to the enclosing class — it's the field's type.
+    expect(callees).not.toContain('CHolder.DoWork');
+    expect(callees).not.toContain('DoWork');
+  });
+
+  test('a local-object call resolves to the local variable type', async () => {
+    const HPP = `class CHolder {
+public:
+  void Run() {
+    CHelper h;
+    h.Assist();
+  }
+};
+`;
+    const { edges } = await chunkCodeTextFull(HPP, 'src/holder.hpp', { chunkSizeTokens: 50 });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    expect(callees).toContain('CHelper.Assist');
+    expect(callees).not.toContain('Assist');
+  });
+
+  test('a member call inside an OUT-OF-LINE method resolves via the class fields', async () => {
+    const HPP = `class CHolder {
+private:
+  CWorker m_worker;
+public:
+  void Run();
+};
+
+void CHolder::Run() {
+  m_worker.DoWork();
+}
+`;
+    const { edges } = await chunkCodeTextFull(HPP, 'src/holder.hpp', { chunkSizeTokens: 50 });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    expect(callees).toContain('CWorker.DoWork');
+  });
+
+  test('a call on an undeclared / unknown receiver stays bare', async () => {
+    const HPP = `class CHolder {
+public:
+  void Run(Something& thing) {
+    thing.Frobnicate();
+  }
+};
+`;
+    const { edges } = await chunkCodeTextFull(HPP, 'src/holder.hpp', { chunkSizeTokens: 50 });
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    // `thing` has no in-scope declaration we can resolve → stay bare.
+    expect(callees).toContain('Frobnicate');
+    expect(callees).not.toContain('CHolder.Frobnicate');
+  });
+});

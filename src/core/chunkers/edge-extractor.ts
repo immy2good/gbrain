@@ -247,6 +247,26 @@ function countCppClassBodyMethods(classNode: any, name: string): number {
   return count;
 }
 
+/** Walk to the translation_unit root. */
+function walkToRoot(node: any): any {
+  let r = node;
+  while (r.parent) r = r.parent;
+  return r;
+}
+
+/** Find a top-level `class_specifier` / `struct_specifier` named `className`. */
+function findCppClassSpecifier(root: any, className: string): any | null {
+  for (const child of root.namedChildren ?? []) {
+    if (
+      (child.type === 'class_specifier' || child.type === 'struct_specifier') &&
+      (child.childForFieldName('name')?.text as string | undefined) === className
+    ) {
+      return child;
+    }
+  }
+  return null;
+}
+
 /**
  * Count the methods named `methodName` belonging to class `className` across a
  * whole translation unit. Prefers the in-file `class_specifier` body (the
@@ -255,14 +275,8 @@ function countCppClassBodyMethods(classNode: any, name: string): number {
  * `qualified_identifier` scope matches.
  */
 function countCppClassMethodsInFile(root: any, className: string, methodName: string): number {
-  for (const child of root.namedChildren ?? []) {
-    if (
-      (child.type === 'class_specifier' || child.type === 'struct_specifier') &&
-      (child.childForFieldName('name')?.text as string | undefined) === className
-    ) {
-      return countCppClassBodyMethods(child, methodName);
-    }
-  }
+  const classNode = findCppClassSpecifier(root, className);
+  if (classNode) return countCppClassBodyMethods(classNode, methodName);
   let count = 0;
   for (const child of root.namedChildren ?? []) {
     if (child.type === 'function_definition') {
@@ -271,6 +285,69 @@ function countCppClassMethodsInFile(root: any, className: string, methodName: st
     }
   }
   return count;
+}
+
+/**
+ * If `declNode` (a `field_declaration` or local `declaration`) declares
+ * `recvName` with a USER-CLASS type (`type_identifier`, e.g.
+ * `CWorker m_worker;`), return that type name. Returns null for primitive
+ * types (`int m_count;` → type is `primitive_type`, not a class) or a name
+ * mismatch — so a method call on a primitive never falsely qualifies.
+ */
+function cppDeclaredClassType(declNode: any, recvName: string): string | null {
+  if (cppMethodName(declNode) !== recvName) return null;
+  const typeNode = declNode.childForFieldName?.('type');
+  if (typeNode?.type === 'type_identifier') return sanitizeIdent(typeNode.text as string);
+  return null;
+}
+
+/**
+ * Resolve the declared class type of a call receiver (`m_worker` in
+ * `m_worker.DoWork()`). Checks, in order: a local variable declaration in the
+ * enclosing method body, then a member field of the enclosing class (found via
+ * the inline `class_specifier` or, for an out-of-line method, the class named
+ * by the definition's `qualified_identifier` scope). Returns null when the
+ * receiver isn't a resolvable class-typed field/local — caller stays bare.
+ */
+function resolveCppReceiverDeclaredType(callNode: any, recvName: string): string | null {
+  let node = callNode.parent;
+  let funcBody: any = null;
+  let className: string | null = null;
+  for (let i = 0; i < WALK_DEPTH_CAP && node; i++) {
+    if (!funcBody && node.type === 'function_definition') {
+      funcBody = node.childForFieldName('body');
+      const ool = cppQualifiedDefScope(node);
+      if (ool) className = className ?? ool.scope;
+    }
+    if (node.type === 'class_specifier' || node.type === 'struct_specifier') {
+      className = (node.childForFieldName('name')?.text as string | undefined) ?? className;
+      break;
+    }
+    node = node.parent;
+  }
+
+  // 1. Local variable declaration in the enclosing method body.
+  if (funcBody) {
+    for (const child of funcBody.namedChildren ?? []) {
+      if (child.type === 'declaration') {
+        const t = cppDeclaredClassType(child, recvName);
+        if (t) return t;
+      }
+    }
+  }
+
+  // 2. Member field of the enclosing class.
+  if (className) {
+    const classNode = findCppClassSpecifier(walkToRoot(callNode), className);
+    const body = classNode?.childForFieldName('body');
+    for (const child of body?.namedChildren ?? []) {
+      if (child.type === 'field_declaration') {
+        const t = cppDeclaredClassType(child, recvName);
+        if (t) return t;
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -283,13 +360,15 @@ function countCppClassMethodsInFile(root: any, className: string, methodName: st
  *   - OUT-OF-LINE: the call sits inside `C::m(){...}` at top level → the class
  *     is named by the definition's `qualified_identifier` scope.
  *
- * The honest precision boundary is identical for both:
+ * The honest precision boundary for implicit-self:
  *   - exactly 1 declaration of `m` in the class → `C.m`
  *   - 0 (global/library call like `MathAbs`)     → null → stay bare
  *   - >1 (overload)                              → null → stay bare (no false edge)
  *
- * Explicit object receivers (`obj.m()`, `m_field.m()`) need member-field type
- * resolution and are a later increment — they return null here.
+ * Explicit member/object receivers (`m_field.m()`, `obj.m()`) resolve to the
+ * RECEIVER's declared class type (`CWorker m_worker;` → `CWorker.m`). The type
+ * is explicit, so the class attribution is certain — no sibling-count needed.
+ * An unresolvable receiver (parameter, unknown, primitive) stays bare.
  */
 function resolveCppReceiver(
   callNode: any,
@@ -297,21 +376,6 @@ function resolveCppReceiver(
   language: SupportedCodeLanguage,
   bareCallee: string,
 ): string | null {
-  // An implicit-self call is either a bare identifier callee (`m()`) or a
-  // `this->m()` / `(*this).m()` field access. Any other explicit receiver
-  // needs member-field type resolution (deferred) → not implicit-self.
-  let implicitSelf = false;
-  if (callee.type === 'identifier') {
-    implicitSelf = true;
-  } else if (callee.type === 'field_expression') {
-    const argText = (callee.childForFieldName('argument')?.text ?? '') as string;
-    if (argText === 'this' || argText === '(*this)') implicitSelf = true;
-    else return null;
-  } else {
-    return null;
-  }
-  if (!implicitSelf) return null;
-
   const qualify = (className: string): string =>
     buildQualifiedName({
       language,
@@ -319,6 +383,27 @@ function resolveCppReceiver(
       symbolType: 'method',
       parentSymbolPath: [className],
     })!;
+
+  // A call is one of: bare `m()` (implicit self), `this->m()` (implicit self),
+  // or `recv.m()` / `recv->m()` (explicit receiver → resolve its declared type).
+  let implicitSelf = false;
+  if (callee.type === 'identifier') {
+    implicitSelf = true;
+  } else if (callee.type === 'field_expression') {
+    const arg = callee.childForFieldName('argument');
+    const argText = (arg?.text ?? '') as string;
+    if (argText === 'this' || argText === '(*this)') {
+      implicitSelf = true;
+    } else if (arg?.type === 'identifier') {
+      const recvType = resolveCppReceiverDeclaredType(callNode, argText);
+      return recvType ? qualify(recvType) : null;
+    } else {
+      return null;
+    }
+  } else {
+    return null;
+  }
+  if (!implicitSelf) return null;
 
   // Walk up looking for the enclosing class (inline) or out-of-line definition.
   let node = callNode.parent;
@@ -335,9 +420,7 @@ function resolveCppReceiver(
       // enclosing class_specifier.
       const ool = cppQualifiedDefScope(node);
       if (ool) {
-        let root = node;
-        while (root.parent) root = root.parent;
-        return countCppClassMethodsInFile(root, ool.scope, bareCallee) === 1
+        return countCppClassMethodsInFile(walkToRoot(node), ool.scope, bareCallee) === 1
           ? qualify(ool.scope)
           : null;
       }

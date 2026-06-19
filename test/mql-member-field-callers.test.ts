@@ -1,0 +1,70 @@
+/**
+ * Member-field call resolution — cross-file end-to-end.
+ *
+ * `m_x.Method()` / `obj.Method()` is the DOMINANT call shape in real MQL
+ * (member objects + accessor methods). It resolves to the receiver's declared
+ * class type, so the call graph spans files: a holder calling
+ * `m_worker.DoWork()` keys on `CWorker.DoWork`, and `getCallersOf('CWorker.DoWork')`
+ * finds it even though CWorker is defined in a different include.
+ */
+
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { importCodeFile } from '../src/core/import-file.ts';
+
+const WORKER_MQH = `class CWorker
+{
+public:
+   double DoWork(double x)
+   {
+      return x * 2.0;
+   }
+};
+`;
+
+const HOLDER_MQH = `#include "Worker.mqh"
+
+class CHolder
+{
+private:
+   CWorker m_worker;
+public:
+   double Run(double x)
+   {
+      return m_worker.DoWork(x);
+   }
+};
+`;
+
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+  await importCodeFile(engine, 'Include/AIMS/Worker.mqh', WORKER_MQH, { noEmbed: true });
+  await importCodeFile(engine, 'Include/AIMS/Holder.mqh', HOLDER_MQH, { noEmbed: true });
+}, 60_000);
+
+afterAll(async () => {
+  if (engine) await engine.disconnect();
+}, 30_000);
+
+describe('MQL — member-field call resolution (cross-file)', () => {
+  test('the call keys on the field type (CWorker.DoWork), not the holder', async () => {
+    const callees = await engine.getCalleesOf('CHolder.Run', { allSources: true });
+    expect(callees.some(c => c.to_symbol_qualified === 'CWorker.DoWork')).toBe(true);
+    expect(callees.some(c => c.to_symbol_qualified === 'CHolder.DoWork')).toBe(false);
+  });
+
+  test('getCallersOf(CWorker.DoWork) finds the cross-file caller in CHolder', async () => {
+    const callers = await engine.getCallersOf('CWorker.DoWork', { allSources: true });
+    expect(callers.some(c => c.from_symbol_qualified.includes('CHolder'))).toBe(true);
+    expect(callers.every(c => c.to_symbol_qualified === 'CWorker.DoWork')).toBe(true);
+  });
+
+  test('bare query "DoWork" still recalls the edge', async () => {
+    const callers = await engine.getCallersOf('DoWork', { allSources: true });
+    expect(callers.length).toBeGreaterThan(0);
+  });
+});
