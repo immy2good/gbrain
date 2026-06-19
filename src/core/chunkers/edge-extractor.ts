@@ -110,6 +110,10 @@ const CALL_CONFIG: Partial<Record<SupportedCodeLanguage, CallConfig>> = {
   go:         { callNodeTypes: new Set(['call_expression']), calleeFieldName: 'function' },
   rust:       { callNodeTypes: new Set(['call_expression', 'method_call_expression']), calleeFieldName: 'function' },
   java:       { callNodeTypes: new Set(['method_invocation']), calleeFieldName: 'name' },
+  // C++ / MQL (tree-sitter-cpp): bare-token call edges (no receiver-type
+  // resolution yet — same baseline as Go/Java).
+  cpp:        { callNodeTypes: new Set(['call_expression']), calleeFieldName: 'function' },
+  mql:        { callNodeTypes: new Set(['call_expression']), calleeFieldName: 'function' },
 };
 
 /**

@@ -9,7 +9,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { chunkCodeText, detectCodeLanguage } from '../../src/core/chunkers/code.ts';
+import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage } from '../../src/core/chunkers/code.ts';
 
 // Derived from itradeaims-indicators mt4/Include/AIMS/Utils/PipCalculator.mqh.
 // Inline class methods + an implicit-`this` method call (CalculatePips ->
@@ -82,5 +82,19 @@ describe('MQL — class method definitions', () => {
     const calculatePips = chunks.find(c => c.metadata.symbolName === 'CalculatePips');
     expect(calculatePips).toBeDefined();
     expect(calculatePips!.metadata.parentSymbolPath).toEqual(['CPipCalculator']);
+  });
+});
+
+describe('MQL — call edges', () => {
+  test('harvests intra-class method call sites', async () => {
+    const { edges } = await chunkCodeTextFull(
+      PIP_CALCULATOR_MQH,
+      'Include/AIMS/Utils/PipCalculator.mqh',
+      { chunkSizeTokens: 50 },
+    );
+    const callees = edges.filter(e => e.edgeType === 'calls').map(e => e.toSymbol);
+    // CalculatePips() calls PriceToPips(); the constructor calls CalculatePointSize().
+    expect(callees).toContain('PriceToPips');
+    expect(callees).toContain('CalculatePointSize');
   });
 });
