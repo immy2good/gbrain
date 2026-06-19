@@ -11,6 +11,10 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importCodeFile } from '../src/core/import-file.ts';
+import { runSources } from '../src/commands/sources.ts';
+
+// Import under a NON-default source — the multi-source shape of a real brain.
+const SRC = 'mql-indicators';
 
 const WORKER_MQH = `class CWorker
 {
@@ -42,8 +46,9 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
-  await importCodeFile(engine, 'Include/AIMS/Worker.mqh', WORKER_MQH, { noEmbed: true });
-  await importCodeFile(engine, 'Include/AIMS/Holder.mqh', HOLDER_MQH, { noEmbed: true });
+  await runSources(engine, ['add', SRC, '--no-federated']);
+  await importCodeFile(engine, 'Include/AIMS/Worker.mqh', WORKER_MQH, { noEmbed: true, sourceId: SRC });
+  await importCodeFile(engine, 'Include/AIMS/Holder.mqh', HOLDER_MQH, { noEmbed: true, sourceId: SRC });
 }, 60_000);
 
 afterAll(async () => {
@@ -66,5 +71,18 @@ describe('MQL — member-field call resolution (cross-file)', () => {
   test('bare query "DoWork" still recalls the edge', async () => {
     const callers = await engine.getCallersOf('DoWork', { allSources: true });
     expect(callers.length).toBeGreaterThan(0);
+  });
+
+  // The jewel must reach a REAL brain, which is multi-source: querying SCOPED
+  // (no allSources) is the user-visible path. Edges carry source_id, so the
+  // scoped query lands and stays source-isolated.
+  test('SCOPED (non-default source) caller/callee queries land and stay isolated', async () => {
+    const scoped = await engine.getCallersOf('CWorker.DoWork', { sourceId: SRC });
+    expect(scoped.some(c => c.from_symbol_qualified === 'CHolder.Run')).toBe(true);
+    const callees = await engine.getCalleesOf('CHolder.Run', { sourceId: SRC });
+    expect(callees.some(c => c.to_symbol_qualified === 'CWorker.DoWork')).toBe(true);
+    // A different source scope must NOT see the edge.
+    const other = await engine.getCallersOf('CWorker.DoWork', { sourceId: 'default' });
+    expect(other.length).toBe(0);
   });
 });
