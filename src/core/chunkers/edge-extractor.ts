@@ -34,6 +34,9 @@
  */
 
 import type { SupportedCodeLanguage } from './code.ts';
+// Type-only cycle: qualified-names.ts imports only a TYPE from code.ts, which
+// dynamically imports this module — so this value import has no runtime cycle.
+import { buildQualifiedName } from './qualified-names.ts';
 
 export interface ExtractedEdge {
   /**
@@ -88,6 +91,10 @@ const RECEIVER_RESOLUTION_LANGS: ReadonlySet<SupportedCodeLanguage> = new Set([
   'tsx',
   'javascript',
   'python',
+  // C/C++ (and MQL, which reuses the tree-sitter-cpp shapes) resolve the
+  // IMPLICIT receiver of an intra-class call to the enclosing class. See
+  // resolveCppReceiver.
+  'cpp',
 ] as const);
 
 /**
@@ -172,6 +179,98 @@ function sanitizeIdent(s: string): string | null {
 }
 
 /**
+ * Extract a C/C++/MQL method name from a `function_definition` by walking the
+ * `declarator` chain (function_definition > [ptr/ref_declarator >]
+ * function_declarator > field_identifier/identifier). Mirrors
+ * code.ts:extractSymbolName's declarator handling; kept local to avoid a
+ * runtime import cycle (code.ts dynamically imports this module). Verified
+ * against tree-sitter-cpp: `function_definition.declarator` →
+ * `function_declarator.declarator` → `field_identifier`.
+ */
+function cppMethodName(funcDef: any): string | null {
+  let cur = funcDef;
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.type === 'identifier' || cur.type === 'field_identifier') {
+      return sanitizeIdent(cur.text as string);
+    }
+    const d = cur.childForFieldName?.('declarator');
+    if (!d) return null;
+    cur = d;
+  }
+  return null;
+}
+
+/**
+ * Count inline sibling methods of a `class_specifier` / `struct_specifier`
+ * whose name equals `name`. Scans the class body's `function_definition`
+ * children — the exact node set code.ts emits as method def chunks, so a
+ * count of 1 means precisely one matching def exists to key the edge on.
+ */
+function countCppSiblingMethods(classNode: any, name: string): number {
+  const body = classNode.childForFieldName?.('body');
+  if (!body) return 0;
+  let count = 0;
+  for (const child of body.namedChildren ?? []) {
+    if (child.type === 'function_definition' && cppMethodName(child) === name) count++;
+  }
+  return count;
+}
+
+/**
+ * C/C++/MQL receiver resolution. Resolves an IMPLICIT-receiver call — a bare
+ * `m()` (the MQL idiom) or `this->m()` — to the enclosing class when exactly
+ * one inline sibling method is named `m`, yielding `C.m` (dotted, matching the
+ * def's qualified name so getCallersOf/getCalleesOf align).
+ *
+ * The honest precision boundary:
+ *   - exactly 1 sibling named `m`  → `C.m` (confident, no conflation)
+ *   - 0 siblings (global/library call like `MathAbs`) → null → stay bare
+ *   - >1 (overload)                → null → stay bare (no confident false edge)
+ *
+ * Explicit object receivers (`obj.m()`, `m_field.m()`) need member-field type
+ * resolution and are a later increment — they return null here.
+ */
+function resolveCppReceiver(
+  callNode: any,
+  callee: any,
+  language: SupportedCodeLanguage,
+  bareCallee: string,
+): string | null {
+  // An implicit-self call is either a bare identifier callee (`m()`) or a
+  // `this->m()` / `(*this).m()` field access. Any other explicit receiver
+  // needs member-field type resolution (deferred) → not implicit-self.
+  let implicitSelf = false;
+  if (callee.type === 'identifier') {
+    implicitSelf = true;
+  } else if (callee.type === 'field_expression') {
+    const argText = (callee.childForFieldName('argument')?.text ?? '') as string;
+    if (argText === 'this' || argText === '(*this)') implicitSelf = true;
+    else return null;
+  } else {
+    return null;
+  }
+  if (!implicitSelf) return null;
+
+  // Walk up to the enclosing class/struct, then apply the sibling-count rule.
+  let node = callNode.parent;
+  for (let i = 0; i < WALK_DEPTH_CAP && node; i++) {
+    if (node.type === 'class_specifier' || node.type === 'struct_specifier') {
+      const className = node.childForFieldName('name')?.text as string | undefined;
+      if (!className) return null;
+      if (countCppSiblingMethods(node, bareCallee) !== 1) return null;
+      return buildQualifiedName({
+        language,
+        symbolName: bareCallee,
+        symbolType: 'method',
+        parentSymbolPath: [className],
+      });
+    }
+    node = node.parent;
+  }
+  return null;
+}
+
+/**
  * v0.34 W1 — Resolve the receiver type of a member-call expression
  * (`obj.method()`) to a qualified callee name (`Class::method` or
  * `module::method`). Tries the 3 MUST-resolve patterns from the design doc:
@@ -202,6 +301,13 @@ function resolveReceiverType(
   if (!cfg) return null;
   const callee = cfg.calleeFieldName ? callNode.childForFieldName(cfg.calleeFieldName) : null;
   if (!callee) return null;
+
+  // C/C++/MQL parse via tree-sitter-cpp (class_specifier, field_expression,
+  // function_definition) — a different AST shape from the JS/TS/Python member-
+  // expression logic below, so route to the dedicated resolver.
+  if (language === 'cpp' || language === 'mql') {
+    return resolveCppReceiver(callNode, callee, language, bareCallee);
+  }
 
   // Only resolve when the callee is a member/attribute access (obj.method).
   // Bare calls (`f()`) have no receiver to resolve.
