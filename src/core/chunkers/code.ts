@@ -125,7 +125,7 @@ async function getParser(): Promise<typeof import('web-tree-sitter')> {
 
 export type SupportedCodeLanguage =
   | 'typescript' | 'tsx' | 'javascript' | 'python' | 'ruby' | 'go'
-  | 'rust' | 'java' | 'c_sharp' | 'cpp' | 'c' | 'php' | 'swift' | 'kotlin'
+  | 'rust' | 'java' | 'c_sharp' | 'cpp' | 'c' | 'mql' | 'php' | 'swift' | 'kotlin'
   | 'scala' | 'lua' | 'elixir' | 'elm' | 'ocaml' | 'dart' | 'zig' | 'solidity'
   | 'bash' | 'css' | 'html' | 'vue' | 'json' | 'yaml' | 'toml' | 'sql';
 
@@ -213,6 +213,10 @@ const LANGUAGE_MANIFEST: Record<SupportedCodeLanguage, LanguageEntry> = {
   c_sharp:    { displayName: 'C#',         embeddedPath: G_CSHARP },
   cpp:        { displayName: 'C++',        embeddedPath: G_CPP },
   c:          { displayName: 'C',          embeddedPath: G_C },
+  // MQL4/MQL5 (MetaQuotes) — a C/C++ subset. Reuse the tree-sitter-cpp grammar
+  // under a distinct tag so filters and qualified-name identity stay separate
+  // from C++.
+  mql:        { displayName: 'MQL',        embeddedPath: G_CPP },
   php:        { displayName: 'PHP',        embeddedPath: G_PHP },
   swift:      { displayName: 'Swift',      embeddedPath: G_SWIFT },
   kotlin:     { displayName: 'Kotlin',     embeddedPath: G_KOTLIN },
@@ -313,6 +317,11 @@ const TOP_LEVEL_TYPES: Partial<Record<SupportedCodeLanguage, Set<string>>> = {
     'function_definition', 'class_specifier', 'struct_specifier',
     'namespace_definition', 'declaration', 'template_declaration',
   ]),
+  // MQL reuses the C++ grammar node shapes.
+  mql: new Set([
+    'function_definition', 'class_specifier', 'struct_specifier',
+    'namespace_definition', 'declaration', 'template_declaration',
+  ]),
   c: new Set(['function_definition', 'struct_specifier', 'declaration', 'preproc_def', 'preproc_include']),
   php: new Set([
     'function_definition', 'class_declaration', 'interface_declaration',
@@ -343,6 +352,9 @@ const BODY_NODE_TYPES = new Set([
   'module_body',
   'body_statement',
   'body',
+  // C/C++/MQL class & struct bodies (tree-sitter-cpp) — descend into them so
+  // nested-emit finds member function_definition nodes.
+  'field_declaration_list',
 ]);
 
 /**
@@ -391,6 +403,16 @@ const NESTED_EMIT_CONFIG: Partial<Record<SupportedCodeLanguage, NestedEmitConfig
     parentTypes: new Set(['class_declaration', 'interface_declaration', 'record_declaration']),
     childTypes: new Set(['method_declaration', 'constructor_declaration']),
   },
+  // C++ inline methods live in the class/struct body as function_definition
+  // nodes (general-purpose; the MQL tag reuses the same tree-sitter-cpp shape).
+  cpp: {
+    parentTypes: new Set(['class_specifier', 'struct_specifier']),
+    childTypes: new Set(['function_definition']),
+  },
+  mql: {
+    parentTypes: new Set(['class_specifier', 'struct_specifier']),
+    childTypes: new Set(['function_definition']),
+  },
 };
 
 let initDone = false;
@@ -433,6 +455,8 @@ export function detectCodeLanguage(filePath: string, content?: string): Supporte
   if (lower.endsWith('.cs')) return 'c_sharp';
   if (lower.endsWith('.cpp') || lower.endsWith('.cc') || lower.endsWith('.cxx') || lower.endsWith('.hpp') || lower.endsWith('.hxx') || lower.endsWith('.hh')) return 'cpp';
   if (lower.endsWith('.c') || lower.endsWith('.h')) return 'c';
+  // MQL4/MQL5 (MetaQuotes): parsed via tree-sitter-cpp under the `mql` tag.
+  if (lower.endsWith('.mq4') || lower.endsWith('.mq5') || lower.endsWith('.mqh')) return 'mql';
   if (lower.endsWith('.php')) return 'php';
   if (lower.endsWith('.swift')) return 'swift';
   if (lower.endsWith('.kt') || lower.endsWith('.kts')) return 'kotlin';
@@ -1059,6 +1083,15 @@ function extractSymbolName(node: any): string | null {
   const declaration = node.childForFieldName('declaration');
   if (declaration) {
     const nested = extractSymbolName(declaration);
+    if (nested) return nested;
+  }
+
+  // C / C++ / MQL: the symbol name lives in a `declarator` chain
+  // (function_definition > function_declarator > identifier), not a `name`
+  // field. Recurse through it; the identifier scan below finds the leaf.
+  const declarator = node.childForFieldName('declarator');
+  if (declarator) {
+    const nested = extractSymbolName(declarator);
     if (nested) return nested;
   }
 
