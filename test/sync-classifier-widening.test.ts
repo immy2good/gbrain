@@ -83,6 +83,25 @@ describe('Layer 2 — isCodeFilePath widening', () => {
     expect(isCodeFilePath('Schema.SQL')).toBe(true); // case-insensitive
   });
 
+  // MQL (MetaTrader MQL4/MQL5) call-graph code-intel wave. The chunker tags
+  // .mq4/.mq5/.mqh as 'mql' over tree-sitter-cpp, but sync only reaches the
+  // chunker for paths isCodeFilePath() admits — so without these extensions
+  // here, `gbrain sync --strategy code` drops every MQL file on the floor and
+  // the code-intel feature never sees a single MetaTrader file. Same bug class
+  // as codex F1 above.
+  test('MQL (MQL4/MQL5) classified as code', () => {
+    expect(isCodeFilePath('Experts/MyEA.mq4')).toBe(true);
+    expect(isCodeFilePath('Experts/MyEA.mq5')).toBe(true);
+    expect(isCodeFilePath('Include/Trade/Trade.mqh')).toBe(true);
+    expect(isCodeFilePath('Button.MQH')).toBe(true); // case-insensitive
+  });
+
+  test('MQL extensions resolve to the mql chunker language', () => {
+    expect(detectCodeLanguage('Experts/MyEA.mq4')).toBe('mql');
+    expect(detectCodeLanguage('Experts/MyEA.mq5')).toBe('mql');
+    expect(detectCodeLanguage('Include/Trade/Trade.mqh')).toBe('mql');
+  });
+
   test('markdown is NOT classified as code', () => {
     expect(isCodeFilePath('docs/README.md')).toBe(false);
     expect(isCodeFilePath('docs/note.mdx')).toBe(false);
