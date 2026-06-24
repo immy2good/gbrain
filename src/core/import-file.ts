@@ -10,6 +10,50 @@ import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedBatch, embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
+
+/**
+ * Read a text file as UTF-8, transparently handling other common encodings.
+ *
+ * MetaTrader MQL files (and plenty of Windows-authored notes) ship as UTF-16.
+ * Reading those with `readFileSync(path, 'utf-8')` mis-decodes them into a
+ * string riddled with U+0000, which Postgres then rejects on insert
+ * (`invalid byte sequence for encoding "UTF8": 0x00`), aborting the whole
+ * sync. We detect the encoding by BOM, fall back to a NUL-density heuristic
+ * for BOM-less UTF-16 (MetaTrader's common export shape), and otherwise treat
+ * the bytes as UTF-8 (the overwhelmingly common case — zero behaviour change).
+ */
+export function readTextFileUtf8(filePath: string): string {
+  return decodeTextBuffer(readFileSync(filePath));
+}
+
+export function decodeTextBuffer(buf: Buffer): string {
+  // BOM-driven decoding (authoritative when present).
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.toString('utf16le', 2);
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return decodeUtf16BE(buf.subarray(2));
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return buf.toString('utf8', 3);
+
+  // No BOM: sniff for UTF-16 via NUL density. Valid UTF-8 text never contains
+  // a NUL byte, so any meaningful run of them signals UTF-16. ASCII in UTF-16LE
+  // puts the NUL at odd byte offsets, UTF-16BE at even offsets — that parity
+  // tells us the endianness.
+  const sniff = Math.min(buf.length, 1024);
+  let evenNul = 0;
+  let oddNul = 0;
+  for (let i = 0; i < sniff; i++) {
+    if (buf[i] === 0x00) (i % 2 === 0 ? evenNul++ : oddNul++);
+  }
+  if (evenNul + oddNul >= sniff * 0.1) {
+    return oddNul >= evenNul ? buf.toString('utf16le') : decodeUtf16BE(buf);
+  }
+  return buf.toString('utf8');
+}
+
+function decodeUtf16BE(buf: Buffer): string {
+  const even = buf.length - (buf.length % 2);
+  const swapped = Buffer.from(buf.subarray(0, even));
+  swapped.swap16();
+  return swapped.toString('utf16le');
+}
 import type { ChunkInput, PageInput, PageType } from './types.ts';
 import { computeEffectiveDate } from './effective-date.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
@@ -931,7 +975,7 @@ export async function importFromFile(
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
   }
 
-  let content = readFileSync(filePath, 'utf-8');
+  let content = readTextFileUtf8(filePath);
 
   // Route code files through the code import path
   if (isCodeFilePath(relativePath)) {
