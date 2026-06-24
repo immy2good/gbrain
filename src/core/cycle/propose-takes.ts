@@ -40,6 +40,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
+import { resolveAlias } from '../model-config.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { GBrainError } from '../types.ts';
@@ -309,6 +310,17 @@ class ProposeTakesPhase extends BaseCyclePhase {
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
+    // Model resolution (fix 2026-06-24). Previously propose_takes was hardwired to
+    // Sonnet (`opts.model ?? 'claude-sonnet-4-6'`) and ignored ALL model config, so
+    // the cost-driving phase silently ran on Sonnet. Resolve a configurable model
+    // here, DEFAULTING TO HAIKU (~3x cheaper; proposals are human-reviewed so the
+    // quality bar is tolerant). Read the dedicated key via engine.getConfig (DB-backed
+    // and reliable) — NOT ctx.config, which is the dead path the budget cap reads.
+    // Override per brain: `gbrain config set models.cycle.propose_takes <model|alias>`.
+    const modelCfg = (await engine.getConfig('models.cycle.propose_takes'))?.trim();
+    const model = opts.model
+      ?? (modelCfg ? await resolveAlias(engine, modelCfg) : 'anthropic:claude-haiku-4-5-20251001');
+
     const result: ProposeTakesResult = {
       pages_scanned: 0,
       cache_hits: 0,
@@ -359,7 +371,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
 
       // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
       const budget = this.checkBudget({
-        modelId: opts.model ?? 'claude-sonnet-4-6',
+        modelId: model,
         estimatedInputTokens: 1500,
         maxOutputTokens: 500,
       });
@@ -378,7 +390,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
           pagePath: page.slug,
           pageBody: body,
           existingTakes,
-          modelHint: opts.model,
+          modelHint: model,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -408,7 +420,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
             p.weight,
             p.domain ?? null,
             JSON.stringify(existingTakes),
-            opts.model ?? 'claude-sonnet-4-6',
+            model,
           ],
         );
         result.proposals_inserted += 1;
@@ -446,8 +458,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
     });
 
     return {
-      summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
-      details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion },
+      summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_inserted} new proposals on ${model} (run ${proposalRunId})`,
+      details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion, model },
       status: result.budget_exhausted ? 'warn' : 'ok',
     };
   }
