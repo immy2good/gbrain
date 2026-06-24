@@ -799,12 +799,17 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
     const current = chunks[i]!;
     const currentTokens = estimateTokens(current.text);
     const currentIsScoped = (current.metadata.parentSymbolPath ?? []).length > 0;
-    // If ANY chunk in this file participates in parent-scope emission, the
-    // scope chunks + their siblings all pass through verbatim. A Python
-    // class body's 3 × 10-token methods are each their own chunk on
-    // purpose — merging would erase the (in ClassName) scope header
-    // Layer 6 just added.
-    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped) {
+    // A named FUNCTION is a call-graph node + a retrieval target, never a
+    // throwaway declaration — so it must survive as its own chunk even when
+    // tiny. MQL indicators are built on small top-level event handlers
+    // (OnInit/OnCalculate/OnChartEvent) that orchestrate everything; merging
+    // them into an anonymous chunk drops their symbol AND every call edge they
+    // own, making the indicator entry layer invisible to the call graph. The
+    // merge's real job is rolling up runs of single-line declarations
+    // (imports/typedefs/consts), not functions.
+    const currentIsNamedFunction =
+      current.metadata.symbolType === 'function' && !!current.metadata.symbolName;
+    if (currentTokens >= mergeThreshold || hasScopedChunks || currentIsScoped || currentIsNamedFunction) {
       merged.push({ ...current, index: merged.length });
       i++;
       continue;
@@ -815,6 +820,11 @@ function mergeSmallSiblings(chunks: CodeChunk[], chunkTarget: number): CodeChunk
     let j = i + 1;
     while (j < chunks.length) {
       const next = chunks[j]!;
+      // Never absorb a named function into a merged group — it's a call-graph
+      // node in its own right. Without this, a preceding tiny declaration
+      // (e.g. a global `CDash g_dashboard;`) starts a group and swallows the
+      // adjacent `OnInit()` handler, erasing its symbol + call edges.
+      if (next.metadata.symbolType === 'function' && !!next.metadata.symbolName) break;
       const nextTokens = estimateTokens(next.text);
       if (groupTokens + nextTokens > chunkTarget) break;
       group.push(next);

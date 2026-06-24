@@ -351,6 +351,20 @@ function resolveCppReceiverDeclaredType(callNode: any, recvName: string): string
       }
     }
   }
+
+  // 3. File-scope GLOBAL object declaration (`CUnifiedDashboard g_dashboard;` at
+  //    translation-unit top level). MQL indicators wire the entry layer
+  //    (OnInit/OnCalculate/OnChartEvent) to their class internals through these
+  //    global singletons — the dominant indicator→class boundary. Same explicit
+  //    declared-type mechanism as locals/fields; resolved last so an enclosing
+  //    local or member field of the same name shadows it (innermost scope wins).
+  const root = walkToRoot(callNode);
+  for (const child of root?.namedChildren ?? []) {
+    if (child.type === 'declaration') {
+      const t = cppDeclaredClassType(child, recvName);
+      if (t) return t;
+    }
+  }
   return null;
 }
 
