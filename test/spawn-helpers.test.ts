@@ -15,6 +15,7 @@ import {
   buildSupervisedWorkerSpawnOptions,
   detectTini,
 } from '../src/core/minions/spawn-helpers.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 describe('buildSpawnInvocation', () => {
   test('without tini: returns cliPath + raw args', () => {
@@ -53,19 +54,18 @@ describe('detectTini', () => {
 });
 
 describe('buildSupervisedWorkerSpawnOptions', () => {
-  test('Windows hides console and ignores stdio outside test runs', () => {
+  test('Windows hides console and ignores stdio outside test runs', async () => {
     const originalPlatform = process.platform;
-    const originalNodeEnv = process.env.NODE_ENV;
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    delete process.env.NODE_ENV;
     try {
-      const opts = buildSupervisedWorkerSpawnOptions({ GBRAIN_SUPERVISED: '1' });
-      expect(opts.windowsHide).toBe(true);
-      expect(opts.stdio).toBe('ignore');
+      // NODE_ENV cleared via withEnv (isolation R1) to simulate a non-test run.
+      await withEnv({ NODE_ENV: undefined }, () => {
+        const opts = buildSupervisedWorkerSpawnOptions({ GBRAIN_SUPERVISED: '1' });
+        expect(opts.windowsHide).toBe(true);
+        expect(opts.stdio).toBe('ignore');
+      });
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
-      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = originalNodeEnv;
     }
   });
 
@@ -83,21 +83,20 @@ describe('buildSupervisedWorkerSpawnOptions', () => {
 });
 
 describe('buildDetachedCliSpawnOptions', () => {
-  test('Windows detached spawn is hidden with ignored stdio outside test runs', () => {
+  test('Windows detached spawn is hidden with ignored stdio outside test runs', async () => {
     const originalPlatform = process.platform;
-    const originalNodeEnv = process.env.NODE_ENV;
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    delete process.env.NODE_ENV;
     try {
-      const opts = buildDetachedCliSpawnOptions({ FOO: 'bar' });
-      expect(opts.detached).toBe(true);
-      expect(opts.windowsHide).toBe(true);
-      expect(opts.stdio).toBe('ignore');
-      expect(opts.env).toEqual({ FOO: 'bar' });
+      // NODE_ENV cleared via withEnv (isolation R1) to simulate a non-test run.
+      await withEnv({ NODE_ENV: undefined }, () => {
+        const opts = buildDetachedCliSpawnOptions({ FOO: 'bar' });
+        expect(opts.detached).toBe(true);
+        expect(opts.windowsHide).toBe(true);
+        expect(opts.stdio).toBe('ignore');
+        expect(opts.env).toEqual({ FOO: 'bar' });
+      });
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
-      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = originalNodeEnv;
     }
   });
 });
