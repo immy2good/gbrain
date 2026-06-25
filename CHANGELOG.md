@@ -2,6 +2,17 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.53.2] - 2026-06-25
+
+Adds `gbrain sources set-strategy <id> <markdown|code|auto>` to persist a
+source's sync strategy in its config, so the auto-sync cycle keeps classifying
+files the same way on every incremental run. Without it, a per-run
+`sync --strategy code|auto` is forgotten and changed code files (e.g.
+`.mq4/.mq5/.mqh`) revert to prose. Use `auto` for mixed code+docs repos.
+
+To take advantage of v0.42.53.2: `gbrain sources set-strategy <id> auto`, then
+`gbrain sync --source <id> --full` once.
+
 ## [0.42.53.1] - 2026-06-24
 
 Consolidated downstream trunk: upstream v0.42.53.0 + a maintained patch set
