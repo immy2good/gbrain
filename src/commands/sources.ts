@@ -481,6 +481,46 @@ async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> 
   }
 }
 
+// ── Subcommand: set-strategy ────────────────────────────────────────
+// `gbrain sources set-strategy <id> <markdown|code|auto>` — persist the
+// per-source sync strategy in sources.config.strategy so the auto-sync
+// CYCLE (which reads `cfg.strategy ?? 'markdown'`) keeps classifying files
+// the same way on every incremental run. Without this, a per-run
+// `sync --strategy code|auto` is forgotten and the next incremental sync
+// reverts CHANGED code files (e.g. .mq4/.mq5/.mqh) to prose. Use `auto`
+// for mixed repos (code files → code, markdown → prose; lossless).
+async function runSetStrategy(engine: BrainEngine, args: string[]): Promise<void> {
+  const id = args[0];
+  const strategy = args[1];
+  const VALID = ['markdown', 'code', 'auto'] as const;
+
+  if (!id || !strategy || !(VALID as readonly string[]).includes(strategy)) {
+    console.error('Usage: gbrain sources set-strategy <id> <markdown|code|auto>');
+    console.error('  markdown  only .md/.mdx files (default).');
+    console.error('  code      only code files (.mq4/.mq5/.mqh, C/C++, TS, …).');
+    console.error('  auto      per-extension: code files as code, markdown as prose (lossless for mixed repos).');
+    process.exit(2);
+  }
+
+  const src = await fetchSource(engine, id);
+  if (!src) {
+    console.error(`Error: source "${id}" not found.`);
+    console.error(`  Run 'gbrain sources list' to see registered sources.`);
+    process.exit(4);
+  }
+
+  const config = parseConfig(src.config);
+  config.strategy = strategy;
+  await engine.executeRaw(
+    `UPDATE sources SET config = $1::text::jsonb WHERE id = $2`,
+    [JSON.stringify(config), id],
+  );
+  console.log(`Set source "${id}" sync strategy = ${strategy}.`);
+  if (strategy !== 'markdown') {
+    console.log(`  → Run 'gbrain sync --source ${id} --full' to re-ingest existing files under the new strategy.`);
+  }
+}
+
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
   if (!id) {
@@ -1333,6 +1373,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'tracked-branch': return runTrackedBranch(engine, rest);
     // v0.40.3.0 contextual retrieval (from master)
     case 'set-cr-mode': return runSetCrMode(engine, rest);
+    case 'set-strategy': return runSetStrategy(engine, rest);
     case 'audit':      return runAudit(engine, rest);
     // v0.42.44 brain-repo git durability
     case 'harden':     { const { runHarden } = await import('./sources-harden.ts'); return runHarden(engine, rest); }
@@ -1389,6 +1430,12 @@ Subcommands:
                                     override (v0.40.3.0). Pass "unset" or
                                     "default" to clear (NULL falls through
                                     to the global search.mode bundle).
+  set-strategy <id> <markdown|code|auto>
+                                    Persist the per-source sync strategy so
+                                    the auto-sync cycle keeps classifying
+                                    files the same way. Use "auto" for mixed
+                                    code+docs repos (code→code, .md→prose).
+                                    Re-run 'sync --source <id> --full' after.
   harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]
                                     v0.42.44 — make a brain repo durable: local
                                     auto-push hook, committed commit-push helper,
