@@ -45,6 +45,11 @@ function buildMockEngine(opts: {
 
   const engine = {
     kind: 'pglite',
+    async getConfig() {
+      // propose_takes resolves models.cycle.propose_takes here; undefined ->
+      // the phase falls through to its built-in Haiku default.
+      return undefined;
+    },
     async listPages() {
       return opts.pages;
     },
