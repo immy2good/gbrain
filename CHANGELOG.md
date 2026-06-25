@@ -2,6 +2,16 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.53.1] - 2026-06-24
+
+Consolidated downstream trunk: upstream v0.42.53.0 + a maintained patch set
+(MQL/C++ code intelligence incl. #include graph, configurable propose_takes
+defaulting to Haiku, UTF-16 ingestion, native-Windows supervisor/autopilot
+fixes). Drops the local op_checkpoints fix in favor of upstream's #2339.
+
+To take advantage of v0.42.53.1: redeploy the hosted image with the Dockerfile
+pin bumped to this commit.
+
 ## [0.42.53.0] - 2026-06-23
 
 **`gbrain sync` works again on managed Postgres brains: the durable-checkpoint pin write was encoding its value the wrong way, so every multi-source sync aborted at the very first checkpoint. Fixed, plus a repo-wide sweep of the same JSONB footgun and a new CI guard so it can't come back.** A recent release added a structural check on the sync checkpoint table; the pin write that runs before every drain bound its value as a string rather than a real array, so the check rejected it and the run bailed before importing anything. The bug was invisible on the embedded engine (its driver parses the value either way) and only bit managed Postgres.
