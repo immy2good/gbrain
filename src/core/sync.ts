@@ -61,6 +61,10 @@ const CODE_EXTENSIONS = new Set<string>([
   '.cs',
   '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh',
   '.c', '.h',
+  // MQL4/MQL5 (MetaTrader). detectCodeLanguage() tags these as 'mql' and they
+  // chunk over the tree-sitter-cpp grammar. Without them here, sync admits no
+  // MetaTrader files and the MQL code-intel feature never sees a single one.
+  '.mq4', '.mq5', '.mqh',
   '.php',
   '.swift',
   '.kt', '.kts',
